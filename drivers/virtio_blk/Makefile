@@ -1,4 +1,4 @@
-# Makefile for the Advanced Host Controller Interface driver (AHCI)
+# Makefile for virtio_blk device
 PROG=	virtio_blk
 SRCS=	virtio_blk.c virtio.c
 
