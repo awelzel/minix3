@@ -2,7 +2,7 @@
 #define _VIRTIO_H
 #include <sys/types.h>
 
-/* This should actually be somweher "official" */
+/* This should actually be somwehere "official" */
 #include "virtio_ring.h"
 
 #define VIRTIO_VENDOR_ID			0x1AF4
@@ -18,6 +18,7 @@
 #define VIRTIO_QNOTFIY_OFF			0x0010
 
 #define VIRTIO_DEV_STATUS_OFF			0x0012
+#define VIRTIO_ISR_STATUS_OFF			0x0013
 #define VIRTIO_DEV_SPECIFIC_OFF			0x0014
 /* if msi is enabled, device specific headers shift by 4 */
 #define VIRTIO_MSI_ADD_OFF			0x0004
@@ -27,10 +28,7 @@
 #define VIRTIO_STATUS_FAIL			0x80	/* 128 */
 
 
-#define VIRTIO_ISR_STATUS_OFF			0x0013
-
 /* TODO: Better pointer types? */
-
 struct virtio_buf_desc {
 	u64_t phys;
 	u32_t len;
@@ -55,7 +53,7 @@ struct virtio_queue {
 	void **data;				/* points to pointers */
 };
 
-/* feature description */
+/* Feature description */
 struct virtio_feature {
 	const char *name;
 	u8_t bit;
@@ -120,11 +118,12 @@ void virtio_write16(struct virtio_config *cfg, off_t offset, u16_t val);
 void virtio_write8(struct virtio_config *cfg, off_t offset, u8_t val);
 
 
-/* device specific reads taking MSI offset into account 
+/* Device specific reads take MSI offset into account and all reads
+ * are at offset 20.
  *
  * Something like:
  * read(off) -->
- * 	read(20 + msi ? 4 : 0 + off
+ * 	readX(20 + (msi ? 4 : 0) + off)
  */
 u32_t virtio_sread32(struct virtio_config *cfg, off_t offset);
 u16_t virtio_sread16(struct virtio_config *cfg, off_t offset);

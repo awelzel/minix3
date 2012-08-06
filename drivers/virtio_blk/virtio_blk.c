@@ -143,8 +143,6 @@ static struct blockdriver virtio_blk_dtab  = {
 	virtio_device
 };
 
-
-
 static int virtio_open(dev_t minor, int access)
 {
 	/* Read only devices should only be mounted... read-only */
@@ -256,9 +254,10 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 				endpt, r));
 		return r;
 	}
-	
-//	dprintf(V_INFO, ("transfer sector=%u size=%08x write=%d pcnt=%d",
-//			 (u32_t) sector, size, write, pcnt));
+#if 0	
+	dprintf(V_INFO, ("transfer sector=%u size=%08x write=%d pcnt=%d",
+			 (u32_t) sector, size, write, pcnt));
+#endif
 
 	vbufs[0].phys = hdr_paddrs[tid];
 	vbufs[0].len = sizeof(hdrs[0]);
@@ -497,14 +496,8 @@ static int virtio_blk_probe()
 	return 0;
 }
 
-
-/*===========================================================================*
- *				sef_cb_init_fresh			     *
- *===========================================================================*/
 static int sef_cb_init_fresh(int type, sef_init_info_t *UNUSED(info))
 {
-	
-	
 	if (virtio_blk_probe())
 		panic("no device found?");
 
@@ -519,7 +512,6 @@ static void sef_cb_signal_handler(int signo)
 	
 	dprintf(V_INFO, ("Terminating..."));
 	virtio_reset(&config);
-//	virtio_irq_disable(&config);
 	virtio_irq_unregister(&config);
 	exit(0);
 }
@@ -538,7 +530,6 @@ int main(int argc, char **argv)
 {
 	/* Driver task.
 	 */
-
 	env_setargs(argc, argv);
 	sef_local_startup();
 

@@ -13,14 +13,13 @@
 
 #include <string.h>			/* memset() */
 
-
-/* TODO: These should actually end up in a libvirtio or so */
+/* TODO: These should end up in a libvirtio or so */
 #include "virtio.h"
 #include "virtio_ring.h"
 
 #include <assert.h>
 
-/* FIXME: Should get these from the kernel? */
+/* HELP/FIXME: Need to get them from the kernel or so... */
 #ifndef PAGE_SIZE
 #define PAGE_SIZE 4096
 #endif
@@ -98,8 +97,6 @@ int virtio_config(const int devind, struct virtio_config *cfg)
 							    i,
 							    q->num);
 	}
-
-
 	/* Ack the device */
 	virtio_write8(cfg, VIRTIO_DEV_STATUS_OFF, VIRTIO_STATUS_ACK);
 
@@ -107,9 +104,11 @@ int virtio_config(const int devind, struct virtio_config *cfg)
 	cfg->irq = pci_attr_r8(devind, PCI_ILR);
 	printf("%s: IRQ: %d\n", cfg->name, cfg->irq);
 	
+
 	/* We panic anywhere above if something goes wrong */
 	return 0;
 }
+
 static void allocate_queue(struct virtio_queue *q)
 {
 	/* So we need memory, a lot */
@@ -205,11 +204,12 @@ static void kick_queue(struct virtio_config *cfg, int qidx)
 /*
  * Linux is doing indirect blocks here if possible.
  * Linux is also not kicking the queue.
- * And linux actually cares about the features...
+ * Linux actually cares about the features...
  *
- * TODO: virtio_buf_desc is similar to what vumap is,
- *       except for the lower bytes. Maybe we can get
- *       rid of that stuff...
+ * TODO: virtio_buf_desc is similar to vumap, but
+ * 	 the write flag. Maybe we can (mis)use the lowest
+ * 	 bit of vp_addr in vumap to indicate write or
+ * 	 read, assuming we at least have word alignment.
  */
 int virtio_to_queue(struct virtio_config *cfg, int qidx,
 			struct virtio_buf_desc *bufs, size_t num,
@@ -281,7 +281,6 @@ int virtio_to_queue(struct virtio_config *cfg, int qidx,
 	kick_queue(cfg, qidx);
 	return 0;
 }
-
 
 int virtio_from_queue(struct virtio_config *cfg, int qidx, void **data)
 {
@@ -426,6 +425,7 @@ u##xx##_t virtio_read##xx(struct virtio_config *cfg, off_t off)		\
 									\
 	return ret;							\
 }
+
 VIRTIO_READ_XX(32, l)
 VIRTIO_READ_XX(16, w)
 VIRTIO_READ_XX(8, b)
