@@ -11,6 +11,8 @@
 #include "virtio_ring.h"
 #include "virtio_blk.h"
 
+#include <assert.h>
+
 /*
  * mknod /dev/c2d0
  * use service up virtio_blk -dev /dev/c2d0 -devstyle STYLE_DEV
@@ -110,11 +112,15 @@ struct device subpart[SUB_PER_DRIVE];	/* subpartitions */
 
 /* Use for actual requests */
 static struct virtio_blk_outhdr hdrs[NUM_THREADS];
-static u8_t status[NUM_THREADS];
+
+/* So usually a status is only one byte, but we have
+ * some alignment issues if we dont take 2 bytes.
+ */
+static u16_t status[NUM_THREADS];
 
 /* Physical addresses */
-static phys_bytes hdr_paddrs[NUM_THREADS];
-static u8_t status_paddrs[NUM_THREADS];
+static struct vumap_phys umap_hdrs[NUM_THREADS];
+static struct vumap_phys umap_status[NUM_THREADS];
 
 /* Prototypes */
 static int virtio_open(dev_t minor, int access);
@@ -178,26 +184,62 @@ static int virtio_close(dev_t minor)
 	return OK;
 }
 
+static int check_addr_set_write(iovec_s_t *iv, struct vumap_vir *vir,
+				struct vumap_phys *phys, int cnt,
+				int write)
+{
+	for (int i = 0; i < cnt ; i++) {
+
+		/* So you gave us a byte aligned buffer? Good job! */
+		if (phys[i].vp_addr & 1) {
+			dprintf(V_ERR, ("odd buffer from %08lx",
+					 phys[i+1].vp_addr));
+			return EINVAL;
+		}
+
+		/* Check if the buffer is good */
+		if (phys[i].vp_size != vir[i].vv_size) {
+			dprintf(V_ERR, ("Non-contig buf %08lx",
+					 phys[i+1].vp_addr));
+			return EINVAL;
+		}
+		
+		/* If write, the buffers only need to be read */
+		phys[i].vp_addr |= !write;
+	}
+
+	return OK;
+}
+
 static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	endpoint_t endpt, iovec_t *iovec, unsigned int cnt, int flags)
 {
-	/* need to translate vir to phys */
+	/* Need to translate vir to phys */
 	struct vumap_vir vir[NR_IOREQS];
-	struct vumap_phys phys[NR_IOREQS];
+
+	/* Physical including header and trailer */
+	struct vumap_phys phys[NR_IOREQS + 2];
+
+	/* Which thread is doing this? */
 	thread_id_t tid = blockdriver_mt_get_tid();
 
-	if (tid != 0)
+#if 0
+	/* see whether we actually do multithreading */
+	if (tid != 0) {
 		dprintf(V_INFO, ("Surprise Surprise!!!"));
+	}
+#endif
 	
 	/* header and tailer */
-	struct virtio_buf_desc vbufs[NR_IOREQS + 2];
 	size_t size = 0;
 	struct device *dv;
 	u64_t sector;
 	u64_t end_part;
-	iovec_s_t *iovec_s;
-	int i, r, access, pcnt = NR_IOREQS;
+	int i, r, access, pcnt = cnt;
+	iovec_s_t *iv = (iovec_s_t *)iovec;
 
+	/* Don't touch this one */
+	iovec = NULL;
 	
 	if (cnt > NR_IOREQS)
 		return EINVAL;
@@ -211,18 +253,17 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	end_part = dv->dv_base + dv->dv_size;
 
 	/* Hmmm, AHCI tries to fix this up, but lets just say everything
-	 * needs to be sector aligned...
+	 * needs to be sector (512 byte ) aligned...
 	 */
 	if (position % VIRTIO_BLK_SIZE) {
-		dprintf(V_ERR, ("No no no :( [%08x]", (u32_t)position));
-		return EINVAL;
+		dprintf(V_ERR, ("Non sector-aligned access [%08x%08x]",
+				(u32_t)(position >> 32), (u32_t)position));
 	}
 	
 	sector = position / VIRTIO_BLK_SIZE;
 
-	iovec_s = (iovec_s_t *)iovec;
 	
-	/* AHCI does a lot of checks here... let's just go ahead
+	/* AHCI does a lot of checks here... lets just go ahead
 	 * and trust the caller... ...cough...
 	 *
 	 * Also, we actually "only" need the physical address.
@@ -230,14 +271,13 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	 */
 	for (i = 0; i < cnt; i++) {
 		if (endpt == SELF)
-			vir[i].vv_addr = (vir_bytes) iovec_s[i].iov_grant;
+			vir[i].vv_addr = (vir_bytes)iv[i].iov_grant;
 		else
-			vir[i].vv_grant = iovec_s[i].iov_grant;
-		vir[i].vv_size = iovec_s[i].iov_size;
+			vir[i].vv_grant = iv[i].iov_grant;
+		vir[i].vv_size = iv[i].iov_size;
 
-		size += iovec_s[i].iov_size;
+		size += iv[i].iov_size;
 	}
-	pcnt = cnt;
 	
 	/* truncate if the partition is smaller than that */
 	if (position + size > end_part - 1) {
@@ -249,7 +289,9 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	access = write ? VUA_READ : VUA_WRITE;
 
 	/* Ok map everything to phys please */
-	if ((r = sys_vumap(endpt, vir, cnt, 0, access, phys, &pcnt)) != OK) {
+	if ((r = sys_vumap(endpt, vir, cnt, 0, access,
+			   &phys[1], &pcnt)) != OK) {
+
 		dprintf(V_ERR, ("Unable to map memory from %d (%d)",
 				endpt, r));
 		return r;
@@ -259,21 +301,24 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 			 (u32_t) sector, size, write, pcnt));
 #endif
 
-	vbufs[0].phys = hdr_paddrs[tid];
-	vbufs[0].len = sizeof(hdrs[0]);
-	vbufs[0].write = 0;
+	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
+	phys[0].vp_size = sizeof(hdrs[0]);
+
+	r = check_addr_set_write(iv, vir, &phys[1], pcnt, write);
+
+	if (r != OK)
+		return r;
+
+	/* Put the status at the end */
+	assert(!(umap_status[tid].vp_addr & 1));
+	phys[pcnt + 1].vp_addr = umap_status[tid].vp_addr;
+	phys[pcnt + 1].vp_size = sizeof(u8_t);
 	
-	for (i = 0; i < pcnt; i++) {
-		vbufs[i + 1].phys = phys[i].vp_addr;
-		vbufs[i + 1].len = iovec_s[i].iov_size;
-		/* if we write, we don't write into the buffer */
-		vbufs[i + 1].write = !write;
-	}
+	/* Status always needs write access */
+	phys[1 + pcnt].vp_addr |= 1;
 
-	vbufs[i + 1].phys = status_paddrs[tid];
-	vbufs[i + 1].len = sizeof(status);
-	vbufs[i + 1].write = 1;
 
+	/* prepare the header */
 	if (write)
 		hdrs[tid].type = VIRTIO_BLK_T_OUT;
 	else
@@ -282,19 +327,27 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	hdrs[tid].ioprio = 0;
 	hdrs[tid].sector = sector;
 
-	status[tid] = 0;
-	/* Uhm... tid is on the statck, hope that's fine */
-	virtio_to_queue(&config, 0, vbufs, 2 + pcnt, &tid);
 
-	/* wait for completion */
+	/* Set status to "failure" */
+	status[tid] = 0xFFFF;
+
+	/* Go to the queue */
+	virtio_to_queue(&config, 0, phys, 2 + pcnt, &tid);
+
+	/* Wait for completion */
 	blockdriver_mt_sleep();
 
-	if (status[tid]) {
-		dprintf(V_ERR, ("status=%02x", status[tid]));
+	/* We only use the last 8 bits of status */
+	if (status[tid] & 0xFF) {
+		dprintf(V_ERR, ("status=%02x", status[tid] & 0xFF));
 		dprintf(V_ERR, ("ER sector=%u size=%x w=%d cnt=%d tid=%d",
 			 	(u32_t) sector, size, write, pcnt, tid));
 		return EIO;
 	}
+#if 0
+	dprintf(V_INFO, ("transfer done=%u size=%08x write=%d pcnt=%d",
+			 (u32_t) sector, size, write, pcnt));
+#endif
 
 	return size;
 }
@@ -380,31 +433,37 @@ static int virtio_device(dev_t minor, device_id_t *id)
 static void virtio_blk_phys_mapping(void)
 {
 	/* Hack to get the physical addresses of hdr and status */
-	struct vumap_vir virs[NUM_THREADS * 2];
-	struct vumap_phys phys[NUM_THREADS * 2];
+	struct vumap_vir virs[NUM_THREADS];
 
-	int r, pcnt, cnt;
-	pcnt = cnt = 2 * NUM_THREADS;
+	int r, cnt, pcnt;
+	pcnt = cnt = NUM_THREADS;
 	int access = VUA_READ  | VUA_WRITE;
 
-	/* prepare array */
-	for (int i = 0; i < 2 * NUM_THREADS; i += 2) {
+	/* prepare array for hdr addresses */
+	for (int i = 0; i < NUM_THREADS; i++) {
 		virs[i].vv_addr = (vir_bytes)&hdrs[i];
 		virs[i].vv_size = sizeof(hdrs[0]);
-		virs[i + 1].vv_addr = (vir_bytes)&status[i];
-		virs[i + 1].vv_size = sizeof(status[0]);
-	}
-
-	/* make the call */
-	if ((r = sys_vumap(SELF, virs, cnt, 0, access, phys, &pcnt))) {
-		panic("%s: Unable to map hdrs and status", config.name);
 	}
 	
-	/* store result */
+	/* make the call */
+	r = sys_vumap(SELF, virs, cnt, 0, access, umap_hdrs, &pcnt);
+
+	if (r != OK)
+		panic("%s: Unable to map hdrs %d", config.name, r);
+	
+	/* prepare array for status addresses */
 	for (int i = 0; i < NUM_THREADS; i++) {
-		hdr_paddrs[i] = phys[i].vp_addr;
-		status_paddrs[i] = phys[i + 1].vp_addr;
+		assert(!((vir_bytes)(&status[i]) & 1));
+		virs[i].vv_addr = (vir_bytes)&status[i];
+		virs[i].vv_size = sizeof(status[0]);
 	}
+
+	pcnt = cnt = NUM_THREADS;
+	
+	r = sys_vumap(SELF, virs, cnt, 0, access, umap_status, &pcnt);
+	
+	if (r != OK)
+		panic("%s: Unable to map status %d", config.name, r);
 }
 
 static int virtio_blk_fsetup(void)

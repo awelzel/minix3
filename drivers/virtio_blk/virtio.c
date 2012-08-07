@@ -212,8 +212,7 @@ static void kick_queue(struct virtio_config *cfg, int qidx)
  * 	 read, assuming we at least have word alignment.
  */
 int virtio_to_queue(struct virtio_config *cfg, int qidx,
-			struct virtio_buf_desc *bufs, size_t num,
-			void *data)
+			struct vumap_phys *bufs, size_t num, void *data)
 {
 	struct virtio_queue *q = &cfg->queues[qidx];
 	struct vring *vring = &q->vring;
@@ -243,14 +242,16 @@ int virtio_to_queue(struct virtio_config *cfg, int qidx,
 		 */
 		assert(vd->flags & VRING_DESC_F_NEXT);
 
-		vd->addr = bufs[count].phys;
-		vd->len = bufs[count].len;
+		/* unset the last bit */
+		vd->addr = bufs[count].vp_addr & (~1);
+		assert(!(vd->addr & 1));
+		vd->len = bufs[count].vp_size;
 
 		/* Reset flags */
 		vd->flags = VRING_DESC_F_NEXT;
 
 		/* If writeable */
-		if (bufs[count].write)
+		if (bufs[count].vp_addr & 1)
 			vd->flags |= VRING_DESC_F_WRITE;
 
 		i = vd->next;

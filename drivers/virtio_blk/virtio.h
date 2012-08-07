@@ -27,14 +27,6 @@
 #define VIRTIO_STATUS_DRV_OK			0x04
 #define VIRTIO_STATUS_FAIL			0x80	/* 128 */
 
-
-/* TODO: Better pointer types? */
-struct virtio_buf_desc {
-	u64_t phys;
-	u32_t len;
-	u8_t write;
-};
-
 struct virtio_queue {
 	
 	void *vaddr;				/* virtual addr of ring */
@@ -94,10 +86,11 @@ int virtio_guest_supports(struct virtio_config *cfg, int bit);
 int virtio_host_supports(struct virtio_config *cfg, int bit);
 
 int virtio_to_queue(struct virtio_config *cfg, int qidx,
-			struct virtio_buf_desc *bufs, size_t num,
-			void *data);
+			struct vumap_phys *bufs, size_t num, void *data);
+
 int virtio_from_queue(struct virtio_config *cfg, int qidx, void **data);
 
+/* Register the IRQ of this virtio device with the system */
 void virtio_irq_register(struct virtio_config *cfg);
 void virtio_irq_unregister(struct virtio_config *cfg);
 void virtio_irq_enable(struct virtio_config *cfg);
