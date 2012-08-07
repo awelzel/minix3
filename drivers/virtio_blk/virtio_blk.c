@@ -152,8 +152,7 @@ static struct blockdriver virtio_blk_dtab  = {
 static int virtio_open(dev_t minor, int access)
 {
 	/* Read only devices should only be mounted... read-only */
-	if ((access & W_BIT) &&
-		virtio_host_supports(&config, VIRTIO_BLK_F_RO))
+	if ((access & W_BIT) && virtio_host_supports(&config, VIRTIO_BLK_F_RO))
 		return EACCES;
 
 	/* The device is opened for the first time.
@@ -403,7 +402,7 @@ static int virtio_ioctl(dev_t minor, unsigned int request,
 
 	case DIOCOPENCT:
 		return sys_safecopyto(endpt, grant, 0,
-			(vir_bytes) open_count, sizeof(open_count));
+			(vir_bytes) &open_count, sizeof(open_count));
 
 	case DIOCFLUSH:
 		if (!virtio_host_supports(&config, VIRTIO_BLK_F_FLUSH)) {
