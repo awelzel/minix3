@@ -169,7 +169,7 @@ static int virtio_open(dev_t minor, int access)
 	}
 
 	open_count++;
-	return 0;
+	return OK;
 }
 
 static int virtio_close(dev_t minor)
@@ -471,7 +471,7 @@ static int virtio_device(dev_t minor, device_id_t *id)
 {
 	/* we only have a single drive here */
 	*id = 0;
-	return 0;
+	return OK;
 }
 
 static void virtio_blk_phys_mapping(void)
@@ -637,5 +637,5 @@ int main(int argc, char **argv)
 	sef_local_startup();
 
 	blockdriver_mt_task(&virtio_blk_dtab);
-	return 0;
+	return OK;
 }
