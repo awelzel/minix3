@@ -184,9 +184,9 @@ static int virtio_close(dev_t minor)
 	return OK;
 }
 
-static int check_addr_set_write(iovec_s_t *iv, struct vumap_vir *vir,
-				struct vumap_phys *phys, int cnt,
-				int write)
+static int check_addr_set_write_perm(iovec_s_t *iv, struct vumap_vir *vir,
+				     struct vumap_phys *phys, int cnt,
+				     int write)
 {
 	for (int i = 0; i < cnt ; i++) {
 
@@ -211,6 +211,42 @@ static int check_addr_set_write(iovec_s_t *iv, struct vumap_vir *vir,
 	return OK;
 }
 
+static int prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir,
+			iovec_s_t *iv, int cnt, vir_bytes *size)
+{
+	/* This is pretty mucht the same as sum_iovec from AHCI
+	 * except that we don't support any iovec where the size
+	 * is not a multiple of 512
+	 */
+	vir_bytes tmp, total = 0;
+	for (int i = 0; i < cnt; i++) {
+		tmp = iv[i].iov_size;
+
+		if (tmp == 0 || (tmp % VIRTIO_BLK_SIZE) || tmp > LONG_MAX) {
+			dprintf(V_ERR, ("bad iv[%d] from %d", i, endpt));
+			return EINVAL;
+		}
+
+		total += tmp;
+
+		if (total > LONG_MAX) {
+			dprintf(V_ERR, ("total overflow  from %d", endpt));
+			return EINVAL;
+		}
+
+		if (endpt == SELF)
+			vir[i].vv_addr = (vir_bytes)iv[i].iov_grant;
+		else
+			vir[i].vv_grant = iv[i].iov_grant;
+
+		vir[i].vv_size = iv[i].iov_size;
+
+	}
+
+	*size = total;
+	return OK;
+}
+
 static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	endpoint_t endpt, iovec_t *iovec, unsigned int cnt, int flags)
 {
@@ -231,12 +267,14 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 #endif
 	
 	/* header and tailer */
-	size_t size = 0;
+	vir_bytes size = 0;
 	struct device *dv;
 	u64_t sector;
 	u64_t end_part;
-	int i, r, access, pcnt = cnt;
+	int r, pcnt;
+
 	iovec_s_t *iv = (iovec_s_t *)iovec;
+	int access = write ? VUA_READ : VUA_WRITE;
 
 	/* Don't touch this one */
 	iovec = NULL;
@@ -258,26 +296,15 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	if (position % VIRTIO_BLK_SIZE) {
 		dprintf(V_ERR, ("Non sector-aligned access [%08x%08x]",
 				(u32_t)(position >> 32), (u32_t)position));
+		return EINVAL;
 	}
 	
 	sector = position / VIRTIO_BLK_SIZE;
 
-	
-	/* AHCI does a lot of checks here... lets just go ahead
-	 * and trust the caller... ...cough...
-	 *
-	 * Also, we actually "only" need the physical address.
-	 * Any faster way to get them?
-	 */
-	for (i = 0; i < cnt; i++) {
-		if (endpt == SELF)
-			vir[i].vv_addr = (vir_bytes)iv[i].iov_grant;
-		else
-			vir[i].vv_grant = iv[i].iov_grant;
-		vir[i].vv_size = iv[i].iov_size;
+	r = prepare_vir_vec(endpt, vir, iv, cnt, &size);
 
-		size += iv[i].iov_size;
-	}
+	if (r != OK)
+		return r;
 	
 	/* truncate if the partition is smaller than that */
 	if (position + size > end_part - 1) {
@@ -285,10 +312,14 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 		size = end_part - position;
 	}
 
-	/* If we write, we only need to read the bufs, but.... */
-	access = write ? VUA_READ : VUA_WRITE;
+	if (size % VIRTIO_BLK_SIZE) {
+		dprintf(V_ERR, ("non-sector sized (%lu) from %d",
+				size, endpt))
+		return EINVAL;
+	}
 
-	/* Ok map everything to phys please */
+	/* Map vir to phys */
+	pcnt = cnt;
 	if ((r = sys_vumap(endpt, vir, cnt, 0, access,
 			   &phys[1], &pcnt)) != OK) {
 
@@ -296,6 +327,7 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 				endpt, r));
 		return r;
 	}
+
 #if 0	
 	dprintf(V_INFO, ("transfer sector=%u size=%08x write=%d pcnt=%d",
 			 (u32_t) sector, size, write, pcnt));
@@ -304,7 +336,7 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
 	phys[0].vp_size = sizeof(hdrs[0]);
 
-	r = check_addr_set_write(iv, vir, &phys[1], pcnt, write);
+	r = check_addr_set_write_perm(iv, vir, &phys[1], pcnt, write);
 
 	if (r != OK)
 		return r;
@@ -339,9 +371,19 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 
 	/* We only use the last 8 bits of status */
 	if (status[tid] & 0xFF) {
-		dprintf(V_ERR, ("status=%02x", status[tid] & 0xFF));
-		dprintf(V_ERR, ("ER sector=%u size=%x w=%d cnt=%d tid=%d",
+		dprintf(V_ERR, ("ERR status=%02x", status[tid] & 0xFF));
+		dprintf(V_ERR, ("ERR sector=%u size=%lx w=%d cnt=%d tid=%d",
 			 	(u32_t) sector, size, write, pcnt, tid));
+
+		for (int i = 0; i < pcnt + 2; i++) {
+			dprintf(V_ERR, ("ERR phys[%02d] %08lx %u",
+					i, phys[i].vp_addr, phys[i].vp_size));
+		}
+
+
+
+
+
 		return EIO;
 	}
 #if 0
@@ -417,8 +459,10 @@ static void virtio_intr(unsigned int UNUSED(irqs))
 		blockdriver_mt_wakeup(*ret_tid);
 	} else {
 		spurious_interrupts += 1;
+#if 0
 		dprintf(V_DEV, ("Spurious Interrupt %8u",
 				spurious_interrupts));
+#endif
 	}
 	virtio_irq_enable(&config);
 }
