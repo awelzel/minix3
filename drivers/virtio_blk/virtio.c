@@ -120,9 +120,6 @@ static void allocate_queue(struct virtio_queue *q)
 	if (!q->vaddr || !q->data)
 		panic("No memory for us");
 
-	printf("queue at v=%p p=%08lx page=%d\n", q->vaddr, q->paddr,
-							    q->page);
-	
 	return;
 }
 
@@ -131,7 +128,7 @@ static void init_queue(struct virtio_queue *q)
 	memset(q->vaddr, 0, q->ring_size);
 	memset(q->data, 0, sizeof(q->data[0]) * q->num);
 
-	/* physical page in guest, that is */
+	/* physical page in guest */
 	q->page = q->paddr / PAGE_SIZE;
 	
 	/* Set pointers in q->vring according to size */
@@ -163,7 +160,13 @@ int virtio_alloc_queues(struct virtio_config *cfg)
 		struct virtio_queue *q = &cfg->queues[i];
 		allocate_queue(q);
 		init_queue(q);
-
+	
+		printf("%s: queue[%02d] v=%p p=%08lx page=%d\n", cfg->name,
+								 i,
+								 q->vaddr,
+								 q->paddr,
+								 q->page);
+	
 		/* select queue */
 		virtio_write16(cfg, VIRTIO_QSEL_OFF, i);
 		/* let the device know about the address */
@@ -179,16 +182,7 @@ int virtio_alloc_queues(struct virtio_config *cfg)
 static int wants_kick(struct virtio_queue *q)
 {
 	assert(q != NULL);
-
-	/* We kick every time, because we don't have a fallback.
-	 *
-	 * Usually something like that should be done:
-	 *
-	 *  return !(q->vring.used->flags & VRING_USED_F_NO_NOTIFY);
-	 *
-	 *  and then also kick when descriptors are low
-	 */
-	return 1;
+	return !(q->vring.used->flags & VRING_USED_F_NO_NOTIFY);
 }
 
 static void kick_queue(struct virtio_config *cfg, int qidx)
