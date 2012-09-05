@@ -213,8 +213,8 @@ static int check_addr_set_write_perm(iovec_s_t *iv, struct vumap_vir *vir,
 static int prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir,
 			iovec_s_t *iv, int cnt, vir_bytes *size)
 {
-	/* This is pretty mucht the same as sum_iovec from AHCI
-	 * except that we don't support any iovec where the size
+	/* This is pretty much the same as sum_iovec from AHCI,
+	 * except that we don't support any iovecs where the size
 	 * is not a multiple of 512
 	 */
 	vir_bytes tmp, total = 0;
@@ -222,14 +222,14 @@ static int prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir,
 		tmp = iv[i].iov_size;
 
 		if (tmp == 0 || (tmp % VIRTIO_BLK_SIZE) || tmp > LONG_MAX) {
-			dprintf(V_ERR, ("bad iv[%d] from %d", i, endpt));
+			dprintf(V_ERR, ("bad iv[%d].iov_size from %d", i, endpt));
 			return EINVAL;
 		}
 
 		total += tmp;
 
 		if (total > LONG_MAX) {
-			dprintf(V_ERR, ("total overflow  from %d", endpt));
+			dprintf(V_ERR, ("total overflow from %d", endpt));
 			return EINVAL;
 		}
 
@@ -275,7 +275,7 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	iovec_s_t *iv = (iovec_s_t *)iovec;
 	int access = write ? VUA_READ : VUA_WRITE;
 
-	/* Don't touch this one */
+	/* Don't touch this one anymore */
 	iovec = NULL;
 	
 	if (cnt > NR_IOREQS)
@@ -332,6 +332,7 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 			 (u32_t) sector, size, write, pcnt));
 #endif
 
+	/* First the header */
 	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
 	phys[0].vp_size = sizeof(hdrs[0]);
 
@@ -378,10 +379,6 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 			dprintf(V_ERR, ("ERR phys[%02d] %08lx %u",
 					i, phys[i].vp_addr, phys[i].vp_size));
 		}
-
-
-
-
 
 		return EIO;
 	}
@@ -452,9 +449,12 @@ static void virtio_geometry(dev_t minor, struct partition *entry)
 static void virtio_intr(unsigned int UNUSED(irqs))
 {
 	thread_id_t *ret_tid;
+	
 	if (virtio_had_irq(&config)) {
+
 		if(virtio_from_queue(&config, 0, (void**)&ret_tid))
 			panic("Could not get data from queue");
+
 		blockdriver_mt_wakeup(*ret_tid);
 	} else {
 		spurious_interrupts += 1;
@@ -509,7 +509,7 @@ static void virtio_blk_phys_mapping(void)
 		panic("%s: Unable to map status %d", config.name, r);
 }
 
-static int virtio_blk_fsetup(void)
+static int virtio_blk_feature_setup(void)
 {
 	/* Feature setup for virtio_blk
 	 *
@@ -517,7 +517,7 @@ static int virtio_blk_fsetup(void)
 	 * any into account.
 	 *
 	 * We use virtio_sread() here, to jump over the generic
-	 * headers using great magic number...
+	 * headers using magic numbers...
 	 */
 	if (virtio_host_supports(&config, VIRTIO_BLK_F_SEG_MAX)) {
 		blk_config.seg_max = virtio_sread32(&config, 12);
@@ -567,7 +567,7 @@ static int virtio_blk_config(struct virtio_config *cfg,
 	dprintf(V_INFO, ("Capacity: %d MB", size_mbs));
 
 	/* do feature setup */
-	virtio_blk_fsetup();
+	virtio_blk_feature_setup();
 
 	virtio_blk_phys_mapping();
 
