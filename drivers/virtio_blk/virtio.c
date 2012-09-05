@@ -199,18 +199,13 @@ static void kick_queue(struct virtio_config *cfg, int qidx)
  * Linux is doing indirect blocks here if possible.
  * Linux is also not kicking the queue.
  * Linux actually cares about the features...
- *
- * TODO: virtio_buf_desc is similar to vumap, but
- * 	 the write flag. Maybe we can (mis)use the lowest
- * 	 bit of vp_addr in vumap to indicate write or
- * 	 read, assuming we at least have word alignment.
  */
 int virtio_to_queue(struct virtio_config *cfg, int qidx,
 			struct vumap_phys *bufs, size_t num, void *data)
 {
 	struct virtio_queue *q = &cfg->queues[qidx];
 	struct vring *vring = &q->vring;
-	int i, count = 0, free_first;
+	int i, count, free_first;
 	struct vring_desc *vd;
 
 	assert(0 <= qidx && qidx <= cfg->num_queues);
@@ -225,18 +220,17 @@ int virtio_to_queue(struct virtio_config *cfg, int qidx,
 	free_first = q->free_head;
 
 	/* TODO Should add an abstraction layer for the ring stuff */
-	for (i = free_first; count < num; count++) {
+	for (i = free_first, count = 0; count < num; count++) {
 
 		/* The next free descriptor */
 		vd = &vring->desc[i];
 	
-		/* The descriptor should be in linked in the free list,
-		 * and have a next entry, or it should be the last
-		 * descriptor there.
+		/* The descriptor is linked in the free list, so
+		 * it always has the next bit set.
 		 */
 		assert(vd->flags & VRING_DESC_F_NEXT);
 
-		/* unset the last bit */
+		/* Unset the last bit as it is used for writable */
 		vd->addr = bufs[count].vp_addr & (~1);
 		assert(!(vd->addr & 1));
 		vd->len = bufs[count].vp_size;
@@ -244,7 +238,7 @@ int virtio_to_queue(struct virtio_config *cfg, int qidx,
 		/* Reset flags */
 		vd->flags = VRING_DESC_F_NEXT;
 
-		/* If writeable */
+		/* If writable, set descriptor flag accordingsly */
 		if (bufs[count].vp_addr & 1)
 			vd->flags |= VRING_DESC_F_WRITE;
 
@@ -254,14 +248,18 @@ int virtio_to_queue(struct virtio_config *cfg, int qidx,
 	/* Unset the next bit in the last descriptor */
 	vd->flags = vd->flags & ~VRING_DESC_F_NEXT;
 
-	/* i is the idx to the descriptor we did not use */
+	/* i presents the idx to the descriptor we did not use
+	 * and therefore it is the new head of the free list
+	 */
 	q->free_head = i;
+
+	/* Used num elements from the free list */
 	q->free_num -= num;
 
 	/* Next index for host is free_head */
 	vring->avail->ring[vring->avail->idx % q->num] = free_first;
 
-	/* data provided by the caller to identify this slot */
+	/* Provided by the caller to identify this slot */
 	q->data[free_first] = data;
 	
 	/* Make sure the host sees the new descriptors */
@@ -285,19 +283,27 @@ int virtio_from_queue(struct virtio_config *cfg, int qidx, void **data)
 	struct vring_desc *vd;
 	int count = 0;
 	u16_t idx;
+	u16_t used_idx;
 
 	assert(0 <= qidx && qidx < cfg->num_queues);
 
 	q = &cfg->queues[qidx];
 	vring = &q->vring;
 
-	/* Make sure we see the changes */
+	/* Make sure we see changes done by the host */
 	__insn_barrier();
 
-	/* get the used element */
+	/* The index from the host */
+	used_idx = vring->used->idx % q->num;
+
+	/* We already saw this one, nothing to do here */
+	if (q->last_used == used_idx)
+		return -1;
+
+	/* Get the vring_used element */
 	uel = &q->vring.used->ring[q->last_used];
 
-	/* update last_used index */
+	/* Update the last used element */
 	q->last_used = (q->last_used + 1) % q->num;
 
 	/* index of the used element */

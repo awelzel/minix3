@@ -85,12 +85,31 @@ int virtio_alloc_queues(struct virtio_config *cfg);
 int virtio_guest_supports(struct virtio_config *cfg, int bit);
 int virtio_host_supports(struct virtio_config *cfg, int bit);
 
+/*
+ * Use num vumap_phys elements and chain these as vring_desc elements
+ * into the vring.
+ *
+ * Kick the queue if needed.
+ *
+ * data is opaque and returned by virtio_from_queue() when the host
+ * processed the descriptor chain.
+ *
+ * Note: The last bit of vp_addr is used to flag whether an iovec is
+ * 	 writable. This implies that only word aligned buffers can be
+ * 	 used.
+ */
 int virtio_to_queue(struct virtio_config *cfg, int qidx,
 			struct vumap_phys *bufs, size_t num, void *data);
 
+/*
+ * If the host used a chain of descriptors, return 0 and set data
+ * as was given to virtio_to_queue(). If the host has not processed
+ * any element returns -1.
+ */
 int virtio_from_queue(struct virtio_config *cfg, int qidx, void **data);
 
-/* Register the IRQ of this virtio device with the system */
+
+/* IRQ related functions */
 void virtio_irq_register(struct virtio_config *cfg);
 void virtio_irq_unregister(struct virtio_config *cfg);
 void virtio_irq_enable(struct virtio_config *cfg);
@@ -100,6 +119,13 @@ void virtio_irq_disable(struct virtio_config *cfg);
  * the interrupt was for this device.
  */
 int virtio_had_irq(struct virtio_config *cfg);
+
+/* Config changes are propagated in the ISR field as well
+ *
+ * TODO: Implement
+ */
+int virtio_had_config_change(struct virtio_config *cfg);
+
 
 void virtio_reset(struct virtio_config *cfg);
 
