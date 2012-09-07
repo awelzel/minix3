@@ -14,8 +14,8 @@
 #include <assert.h>
 
 /*
- * mknod /dev/c2d0
- * use service up virtio_blk -dev /dev/c2d0 -devstyle STYLE_DEV
+ * # mknod /dev/c2d0
+ * # service up virtio_blk -dev /dev/c2d0 -devstyle STYLE_DEV
  */
 
 /* From AHCI driver, currently ony V_INFO is used all the time */
@@ -39,6 +39,7 @@ enum {
 
 
 struct virtio_feature blk_features[] = {
+	/* name ,	bit,			host,	guest	*/
 	{ "barrier",	VIRTIO_BLK_F_BARRIER,	0,	0 	},
 	{ "sizemax",	VIRTIO_BLK_F_SIZE_MAX,	0,	0	},
 	{ "segmax",	VIRTIO_BLK_F_SEG_MAX,	0,	0	},
@@ -64,7 +65,7 @@ struct virtio_queue blk_queues[1];
 
 struct virtio_config config = {
 	"virtio-blk",
-	-1,						/* port */
+	-1,						/* io port */
 	blk_features,
 	sizeof(blk_features) / sizeof(blk_features[0]),
 	blk_queues,
@@ -77,30 +78,8 @@ struct virtio_config config = {
 };
 
 
-/* So, we only have a single drive here and need to go through all
- * this trouble?
- *
- * DEV_PER_DRIVE is NR_PARTITIONS + 1
- * and NR_PARTITIONS is 4.
- *
- * SUB_PER_DRIVE is defined by ahci as NR_PARTITIONS^2
- * --> 16
- * c0 c0d0 c0d1 c0d2 c0d3
- * ^^^^^^^^^^^^^^^^^^^^^^
- *    5 minors?
- *
- * p0s0 p0s1 p0s2 p0s3
- * ^^^^^^^^^^^^^^^^^^^
- *    for c0dx for x > 0 --> 16
- *
- * Is this true? And why should we actually care?
- *
- */
 #define MAX_DRIVES			1
 #define SUB_PER_DRIVE			(NR_PARTITIONS * NR_PARTITIONS)
-#define NR_SUBDEVS			(MAX_DRIVES * SUB_PER_DRIVE)
-#define NR_MINORS			(MAX_DRIVES * DEV_PER_DRIVE)
-
 #define VIRTIO_BLK_SIZE			512
 
 /* Actually, I think it "should" work */
@@ -133,6 +112,7 @@ static struct device *virtio_part(dev_t minor);
 static void virtio_geometry(dev_t minor, struct partition *entry);
 static void virtio_intr(unsigned int UNUSED(irqs));
 static int virtio_device(dev_t minor, device_id_t *id);
+
 
 static struct blockdriver virtio_blk_dtab  = {
 	BLOCKDRIVER_TYPE_DISK,
@@ -286,6 +266,11 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 		return OK;
 
 	dv = virtio_part(minor);
+
+	if (!dv)
+		return ENXIO;
+
+
 	position += dv->dv_base;
 	end_part = dv->dv_base + dv->dv_size;
 
@@ -417,17 +402,27 @@ static int virtio_ioctl(dev_t minor, unsigned int request,
 
 static struct device *virtio_part(dev_t minor)
 {
-	/* So this whole partition thing... I don't trust... */
+	/* There's only a single drive attached to this
+	 * controller, so take some shortcuts.
+	 */
+
+	/* Take care of d0 d0p0 ... */
+	if (minor < 5)
+		return &part[minor];
 	
-	if (minor < NR_MINORS) {
-		return &part[minor % DEV_PER_DRIVE];
-	} else {
-		if ((unsigned)(minor -= MINOR_d0p0s0) < NR_SUBDEVS) {
-			return &subpart[minor % SUB_PER_DRIVE];
-		}
+	/* subparts start at 128 */
+	if (minor >= 128) {
+
+		/* Mask away upper bits */
+		minor = minor & 0x7F;
+
+		/* Only for the first disk */
+		if (minor > 15)
+			return NULL;
+
+		return &subpart[minor];
 	}
 
-	panic("No surprise, virtio_part() is broken....");
 	return NULL;
 }
 
@@ -452,7 +447,7 @@ static void virtio_intr(unsigned int UNUSED(irqs))
 	
 	if (virtio_had_irq(&config)) {
 
-		if(virtio_from_queue(&config, 0, (void**)&ret_tid))
+		if (virtio_from_queue(&config, 0, (void**)&ret_tid))
 			panic("Could not get data from queue");
 
 		blockdriver_mt_wakeup(*ret_tid);
@@ -468,7 +463,12 @@ static void virtio_intr(unsigned int UNUSED(irqs))
 
 static int virtio_device(dev_t minor, device_id_t *id)
 {
-	/* we only have a single drive here */
+	struct device *dev = virtio_part(minor);
+
+	/* Check if this device exists */
+	if (!dev)
+		return ENXIO;
+
 	*id = 0;
 	return OK;
 }
