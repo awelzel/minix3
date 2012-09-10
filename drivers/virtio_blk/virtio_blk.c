@@ -163,7 +163,7 @@ static int virtio_close(dev_t minor)
 	return OK;
 }
 
-static int check_addr_set_write_perm(iovec_s_t *iv, struct vumap_vir *vir,
+static int check_addr_set_write_perm(struct vumap_vir *vir,
 				     struct vumap_phys *phys, int cnt,
 				     int write)
 {
@@ -182,7 +182,7 @@ static int check_addr_set_write_perm(iovec_s_t *iv, struct vumap_vir *vir,
 					 phys[i+1].vp_addr));
 			return EINVAL;
 		}
-		
+
 		/* If write, the buffers only need to be read */
 		phys[i].vp_addr |= !write;
 	}
@@ -202,7 +202,7 @@ static int prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir,
 		tmp = iv[i].iov_size;
 
 		if (tmp == 0 || (tmp % VIRTIO_BLK_SIZE) || tmp > LONG_MAX) {
-			dprintf(V_ERR, ("bad iv[%d].iov_size from %d", i, endpt));
+			dprintf(V_ERR, ("bad iv[%d].iov_size (%lu) from %d", i, tmp, endpt));
 			return EINVAL;
 		}
 
@@ -238,15 +238,9 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	/* Which thread is doing this? */
 	thread_id_t tid = blockdriver_mt_get_tid();
 
-#if 0
-	/* see whether we actually do multithreading */
-	if (tid != 0) {
-		dprintf(V_INFO, ("Surprise Surprise!!!"));
-	}
-#endif
-	
 	/* header and tailer */
 	vir_bytes size = 0;
+	vir_bytes size_tmp = 0;
 	struct device *dv;
 	u64_t sector;
 	u64_t end_part;
@@ -257,13 +251,13 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 
 	/* Don't touch this one anymore */
 	iovec = NULL;
-	
+
 	if (cnt > NR_IOREQS)
 		return EINVAL;
 
 	/* position greater than capacity? */
 	if (position >= blk_config.capacity * VIRTIO_BLK_SIZE)
-		return OK;
+		return 0;
 
 	dv = virtio_part(minor);
 
@@ -282,29 +276,52 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 				(u32_t)(position >> 32), (u32_t)position));
 		return EINVAL;
 	}
-	
+
 	sector = position / VIRTIO_BLK_SIZE;
 
 	r = prepare_vir_vec(endpt, vir, iv, cnt, &size);
 
 	if (r != OK)
 		return r;
-	
-	/* truncate if the partition is smaller than that */
+
+	if (position == end_part)
+		return 0;
+
+	if (position > end_part)
+		return 0;
+
+	/* Truncate if the partition is smaller than that */
 	if (position + size > end_part - 1) {
-		dprintf(V_INFO, ("Uhmm... dragons... everywhere..."));
 		size = end_part - position;
+
+		/* Fix up later */
+		size_tmp = 0;
+		pcnt = 0;
+	} else {
+		/* Use all buffers */
+		size_tmp = size;
+		pcnt = cnt;
+	}
+
+	/* Fix up the number of vectors if size was truncated */
+	while (size_tmp < size)
+		size_tmp += vir[pcnt++].vv_size;
+
+	/* If the last vector was too big, just truncate it */
+	if (size_tmp > size) {
+		vir[pcnt - 1].vv_size = vir[pcnt -1].vv_size - (size_tmp - size);
+		size_tmp -= (size_tmp - size);
 	}
 
 	if (size % VIRTIO_BLK_SIZE) {
-		dprintf(V_ERR, ("non-sector sized (%lu) from %d",
+		dprintf(V_ERR, ("non-sector sized read (%lu) from %d",
 				size, endpt))
 		return EINVAL;
 	}
 
+
 	/* Map vir to phys */
-	pcnt = cnt;
-	if ((r = sys_vumap(endpt, vir, cnt, 0, access,
+	if ((r = sys_vumap(endpt, vir, pcnt, 0, access,
 			   &phys[1], &pcnt)) != OK) {
 
 		dprintf(V_ERR, ("Unable to map memory from %d (%d)",
@@ -312,16 +329,11 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 		return r;
 	}
 
-#if 0	
-	dprintf(V_INFO, ("transfer sector=%u size=%08x write=%d pcnt=%d",
-			 (u32_t) sector, size, write, pcnt));
-#endif
-
 	/* First the header */
 	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
 	phys[0].vp_size = sizeof(hdrs[0]);
 
-	r = check_addr_set_write_perm(iv, vir, &phys[1], pcnt, write);
+	r = check_addr_set_write_perm(vir, &phys[1], pcnt, write);
 
 	if (r != OK)
 		return r;
@@ -330,7 +342,7 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	assert(!(umap_status[tid].vp_addr & 1));
 	phys[pcnt + 1].vp_addr = umap_status[tid].vp_addr;
 	phys[pcnt + 1].vp_size = sizeof(u8_t);
-	
+
 	/* Status always needs write access */
 	phys[1 + pcnt].vp_addr |= 1;
 
@@ -367,10 +379,6 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 
 		return EIO;
 	}
-#if 0
-	dprintf(V_INFO, ("transfer done=%u size=%08x write=%d pcnt=%d",
-			 (u32_t) sector, size, write, pcnt));
-#endif
 
 	return size;
 }
@@ -391,7 +399,7 @@ static int virtio_ioctl(dev_t minor, unsigned int request,
 			/* But even if, we don't do flushes yet */
 			return EIO;
 		}
-		
+
 		dprintf(V_INFO, ("Host has no flush support"));
 
 	}
@@ -409,7 +417,7 @@ static struct device *virtio_part(dev_t minor)
 	/* Take care of d0 d0p0 ... */
 	if (minor < 5)
 		return &part[minor];
-	
+
 	/* subparts start at 128 */
 	if (minor >= 128) {
 
@@ -444,7 +452,7 @@ static void virtio_geometry(dev_t minor, struct partition *entry)
 static void virtio_intr(unsigned int UNUSED(irqs))
 {
 	thread_id_t *ret_tid;
-	
+
 	if (virtio_had_irq(&config)) {
 
 		if (virtio_from_queue(&config, 0, (void**)&ret_tid))
@@ -453,11 +461,8 @@ static void virtio_intr(unsigned int UNUSED(irqs))
 		blockdriver_mt_wakeup(*ret_tid);
 	} else {
 		spurious_interrupts += 1;
-#if 0
-		dprintf(V_DEV, ("Spurious Interrupt %8u",
-				spurious_interrupts));
-#endif
 	}
+
 	virtio_irq_enable(&config);
 }
 
@@ -487,13 +492,13 @@ static void virtio_blk_phys_mapping(void)
 		virs[i].vv_addr = (vir_bytes)&hdrs[i];
 		virs[i].vv_size = sizeof(hdrs[0]);
 	}
-	
+
 	/* make the call */
 	r = sys_vumap(SELF, virs, cnt, 0, access, umap_hdrs, &pcnt);
 
 	if (r != OK)
 		panic("%s: Unable to map hdrs %d", config.name, r);
-	
+
 	/* prepare array for status addresses */
 	for (int i = 0; i < NUM_THREADS; i++) {
 		assert(!((vir_bytes)(&status[i]) & 1));
@@ -502,9 +507,9 @@ static void virtio_blk_phys_mapping(void)
 	}
 
 	pcnt = cnt = NUM_THREADS;
-	
+
 	r = sys_vumap(SELF, virs, cnt, 0, access, umap_status, &pcnt);
-	
+
 	if (r != OK)
 		panic("%s: Unable to map status %d", config.name, r);
 }
@@ -523,7 +528,7 @@ static int virtio_blk_feature_setup(void)
 		blk_config.seg_max = virtio_sread32(&config, 12);
 		dprintf(V_INFO, ("Seg Max: %d", blk_config.seg_max));
 	}
-	
+
 	if (virtio_host_supports(&config, VIRTIO_BLK_F_GEOMETRY)) {
 		blk_config.geometry.cylinders = virtio_sread16(&config, 16);
 		blk_config.geometry.heads= virtio_sread8(&config, 18);
@@ -533,18 +538,18 @@ static int virtio_blk_feature_setup(void)
 					blk_config.geometry.heads,
 					blk_config.geometry.sectors));
 	}
-	
+
 	if (virtio_host_supports(&config, VIRTIO_BLK_F_SIZE_MAX))
 		dprintf(V_INFO, ("Has size max"));
-	
+
 	if (virtio_host_supports(&config, VIRTIO_BLK_F_FLUSH))
 		dprintf(V_INFO, ("Has flush"));
-	
+
 	if (virtio_host_supports(&config, VIRTIO_BLK_F_BLK_SIZE)) {
 		blk_config.blk_size = virtio_sread32(&config, 20);
 		dprintf(V_INFO, ("Block Size: %d", blk_config.blk_size));
 	}
-	
+
 	if (virtio_host_supports(&config, VIRTIO_BLK_F_BARRIER))
 		dprintf(V_INFO, ("Has barrier"));
 
@@ -586,9 +591,9 @@ static int virtio_blk_probe()
 	}
 
 	dprintf(V_INFO, ("Found device at index=%d", devind));
-	
+
 	virtio_config(devind, &config);
-	
+
 	virtio_blk_config(&config, &blk_config);
 
 	virtio_alloc_queues(&config);
@@ -611,7 +616,7 @@ static int sef_cb_init_fresh(int type, sef_init_info_t *UNUSED(info))
 static void sef_cb_signal_handler(int signo)
 {
 	dprintf(V_INFO, ("Got signal"));
-	
+
 	dprintf(V_INFO, ("Terminating..."));
 	virtio_reset(&config);
 	virtio_irq_unregister(&config);
