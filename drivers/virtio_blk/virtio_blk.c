@@ -142,6 +142,8 @@ static int virtio_open(dev_t minor, int access)
 	 * point.
 	 */
 	if (open_count == 0) {
+		memset(part, 0, sizeof(part));
+		memset(subpart, 0, sizeof(subpart));
 		part[0].dv_size = blk_config.capacity * VIRTIO_BLK_SIZE;
 		partition(&virtio_blk_dtab, 0, P_PRIMARY, 0 /* ATAPI */);
 		blockdriver_mt_set_workers(0, NUM_THREADS);
@@ -366,7 +368,7 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	/* Wait for completion */
 	blockdriver_mt_sleep();
 
-	/* We only use the last 8 bits of status */
+	/* Check status, only the lower 8 bits */
 	if (status[tid] & 0xFF) {
 		dprintf(V_ERR, ("ERR status=%02x", status[tid] & 0xFF));
 		dprintf(V_ERR, ("ERR sector=%u size=%lx w=%d cnt=%d tid=%d",
