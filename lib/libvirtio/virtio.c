@@ -13,9 +13,8 @@
 
 #include <string.h>			/* memset() */
 
-/* TODO: These should end up in a libvirtio or so */
-#include "virtio.h"
-#include "virtio_ring.h"
+#include <minix/virtio.h>		/* system include */
+#include <minix/virtio_ring.h>		/* system include */
 
 #include <assert.h>
 

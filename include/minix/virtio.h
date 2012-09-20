@@ -1,9 +1,7 @@
 #ifndef _VIRTIO_H
 #define _VIRTIO_H
 #include <sys/types.h>
-
-/* This should actually be somwehere "official" */
-#include "virtio_ring.h"
+#include <minix/virtio_ring.h>
 
 #define VIRTIO_VENDOR_ID			0x1AF4
 #define VIRTIO_BLK_SUBDEV_ID			0x0002

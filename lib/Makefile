@@ -10,7 +10,7 @@ SUBDIR+= libcompat_minix libc libblockdriver libchardriver     \
 	libexec libdevman libusb libminlib libasyn          \
 	libddekit libminixfs libbdev libelf libminc libcrypt libterminfo \
 	libvassert libutil libbz2 libprop librmt \
-	libnetsock libpuffs libsffs libhgfs libvboxfs 
+	libnetsock libpuffs libsffs libhgfs libvboxfs libvirtio
 
 SUBDIR+=        ../external/public-domain/xz/lib
 

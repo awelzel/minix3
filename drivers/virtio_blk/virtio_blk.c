@@ -7,8 +7,8 @@
 #include <sys/ioc_disk.h>
 #include <sys/mman.h>
 
-#include "virtio.h"
-#include "virtio_ring.h"
+#include <minix/virtio.h>
+#include <minix/virtio_ring.h>
 #include "virtio_blk.h"
 
 #include <assert.h>
