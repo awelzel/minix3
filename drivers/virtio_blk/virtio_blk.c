@@ -246,7 +246,7 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	struct device *dv;
 	u64_t sector;
 	u64_t end_part;
-	int r, pcnt;
+	int r, pcnt = sizeof(phys) / sizeof(phys[0]);
 
 	iovec_s_t *iv = (iovec_s_t *)iovec;
 	int access = write ? VUA_READ : VUA_WRITE;
@@ -298,20 +298,19 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 
 		/* Fix up later */
 		size_tmp = 0;
-		pcnt = 0;
+		cnt = 0;
 	} else {
 		/* Use all buffers */
 		size_tmp = size;
-		pcnt = cnt;
 	}
 
 	/* Fix up the number of vectors if size was truncated */
 	while (size_tmp < size)
-		size_tmp += vir[pcnt++].vv_size;
+		size_tmp += vir[cnt++].vv_size;
 
 	/* If the last vector was too big, just truncate it */
 	if (size_tmp > size) {
-		vir[pcnt - 1].vv_size = vir[pcnt -1].vv_size - (size_tmp - size);
+		vir[cnt - 1].vv_size = vir[cnt -1].vv_size - (size_tmp - size);
 		size_tmp -= (size_tmp - size);
 	}
 
@@ -323,7 +322,7 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 
 
 	/* Map vir to phys */
-	if ((r = sys_vumap(endpt, vir, pcnt, 0, access,
+	if ((r = sys_vumap(endpt, vir, cnt, 0, access,
 			   &phys[1], &pcnt)) != OK) {
 
 		dprintf(V_ERR, ("Unable to map memory from %d (%d)",
@@ -341,15 +340,14 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 		return r;
 
 	/* Put the status at the end */
-	assert(!(umap_status[tid].vp_addr & 1));
 	phys[pcnt + 1].vp_addr = umap_status[tid].vp_addr;
 	phys[pcnt + 1].vp_size = sizeof(u8_t);
+	assert(!(phys[pcnt +  1].vp_addr & 1));
 
 	/* Status always needs write access */
 	phys[1 + pcnt].vp_addr |= 1;
 
-
-	/* prepare the header */
+	/* Prepare the header */
 	if (write)
 		hdrs[tid].type = VIRTIO_BLK_T_OUT;
 	else
@@ -362,7 +360,7 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 	/* Set status to "failure" */
 	status[tid] = 0xFFFF;
 
-	/* Go to the queue */
+	/* Send addresses to queue */
 	virtio_to_queue(&config, 0, phys, 2 + pcnt, &tid);
 
 	/* Wait for completion */
@@ -373,11 +371,6 @@ static ssize_t virtio_transfer(dev_t minor, int write, u64_t position,
 		dprintf(V_ERR, ("ERR status=%02x", status[tid] & 0xFF));
 		dprintf(V_ERR, ("ERR sector=%u size=%lx w=%d cnt=%d tid=%d",
 			 	(u32_t) sector, size, write, pcnt, tid));
-
-		for (int i = 0; i < pcnt + 2; i++) {
-			dprintf(V_ERR, ("ERR phys[%02d] %08lx %u",
-					i, phys[i].vp_addr, phys[i].vp_size));
-		}
 
 		return EIO;
 	}
