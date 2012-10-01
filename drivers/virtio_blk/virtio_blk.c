@@ -14,16 +14,7 @@
 
 #include "virtio_blk.h"
 
-/* From AHCI driver, currently ony V_INFO is used all the time */
-enum {
-	V_NONE,	/* no output at all; keep silent */
-	V_ERR,	/* important error information only (the default) */
-	V_INFO,	/* general information about the driver and devices */
-	V_DEV,	/* device details, to help with detection problems */
-	V_REQ	/* detailed information about requests */
-};
-
-#define dprintf(v,s) do {					\
+#define dprintf(s) do {						\
 	printf("%s: ", name);					\
 	printf s;						\
 	printf("\n");						\
@@ -140,15 +131,13 @@ check_addr_set_write_perm(struct vumap_vir *vir, struct vumap_phys *phys,
 
 		/* So you gave us a byte aligned buffer? Good job! */
 		if (phys[i].vp_addr & 1) {
-			dprintf(V_ERR, ("odd buffer from %08lx",
-					 phys[i+1].vp_addr));
+			dprintf(("odd buffer from %08lx", phys[i+1].vp_addr));
 			return EINVAL;
 		}
 
 		/* Check if the buffer is good */
 		if (phys[i].vp_size != vir[i].vv_size) {
-			dprintf(V_ERR, ("Non-contig buf %08lx",
-					 phys[i+1].vp_addr));
+			dprintf(("Non-contig buf %08lx", phys[i+1].vp_addr));
 			return EINVAL;
 		}
 
@@ -172,15 +161,15 @@ prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir, iovec_s_t *iv,
 		tmp = iv[i].iov_size;
 
 		if (tmp == 0 || (tmp % VIRTIO_BLK_BLOCK_SIZE) || tmp > LONG_MAX) {
-			dprintf(V_ERR, ("bad iv[%d].iov_size (%lu) from %d", i, tmp,
-									     endpt));
+			dprintf(("bad iv[%d].iov_size (%lu) from %d", i, tmp,
+									 endpt));
 			return EINVAL;
 		}
 
 		total += tmp;
 
 		if (total > LONG_MAX) {
-			dprintf(V_ERR, ("total overflow from %d", endpt));
+			dprintf(("total overflow from %d", endpt));
 			return EINVAL;
 		}
 
@@ -244,8 +233,7 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	 * needs to be sector (512 byte ) aligned...
 	 */
 	if (position % VIRTIO_BLK_BLOCK_SIZE) {
-		dprintf(V_ERR, ("Non sector-aligned access [%08x%08x]",
-				(u32_t)(position >> 32), (u32_t)position));
+		dprintf(("Non sector-aligned access %016llx", position));
 		return EINVAL;
 	}
 
@@ -285,8 +273,7 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	}
 
 	if (size % VIRTIO_BLK_BLOCK_SIZE) {
-		dprintf(V_ERR, ("non-sector sized read (%lu) from %d",
-				size, endpt))
+		dprintf(("non-sector sized read (%lu) from %d", size, endpt));
 		return EINVAL;
 	}
 
@@ -294,8 +281,7 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	if ((r = sys_vumap(endpt, vir, cnt, 0, access,
 			   &phys[1], &pcnt)) != OK) {
 
-		dprintf(V_ERR, ("Unable to map memory from %d (%d)",
-				endpt, r));
+		dprintf(("Unable to map memory from %d (%d)", endpt, r));
 		return r;
 	}
 
@@ -337,9 +323,9 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 
 	/* Check status, only the lower 8 bits */
 	if (status[tid] & 0xFF) {
-		dprintf(V_ERR, ("ERR status=%02x", status[tid] & 0xFF));
-		dprintf(V_ERR, ("ERR sector=%u size=%lx w=%d cnt=%d tid=%d",
-			 	(u32_t) sector, size, write, pcnt, tid));
+		dprintf(("ERR status=%02x", status[tid] & 0xFF));
+		dprintf(("ERR sector=%u size=%lx w=%d cnt=%d tid=%d",
+			(u32_t) sector, size, write, pcnt, tid));
 
 		return EIO;
 	}
@@ -359,11 +345,12 @@ virtio_ioctl(dev_t minor, unsigned int request, endpoint_t endpt,
 
 	case DIOCFLUSH:
 		if (!virtio_host_supports(config, VIRTIO_BLK_F_FLUSH)) {
-			/* But even if, we don't do flushes yet */
+
+			/* TODO: Implement */
 			return EIO;
 		}
 
-		dprintf(V_INFO, ("Host has no flush support"));
+		dprintf(("Host has no flush support"));
 
 	}
 
@@ -431,7 +418,7 @@ virtio_intr(unsigned int UNUSED(irqs))
 		}
 	} else if (!spurious_interrupt) {
 		spurious_interrupt = 1;
-		dprintf(V_INFO, ("Got spurious interrupt"));
+		dprintf(("Got spurious interrupt"));
 	}
 
 	virtio_irq_enable(config);
@@ -500,32 +487,33 @@ virtio_blk_feature_setup(void)
 	 */
 	if (virtio_host_supports(config, VIRTIO_BLK_F_SEG_MAX)) {
 		blk_config.seg_max = virtio_sread32(config, 12);
-		dprintf(V_INFO, ("Seg Max: %d", blk_config.seg_max));
+		dprintf(("Seg Max: %d", blk_config.seg_max));
 	}
 
 	if (virtio_host_supports(config, VIRTIO_BLK_F_GEOMETRY)) {
 		blk_config.geometry.cylinders = virtio_sread16(config, 16);
 		blk_config.geometry.heads= virtio_sread8(config, 18);
 		blk_config.geometry.sectors = virtio_sread8(config, 19);
-		dprintf(V_INFO, ("Geometry: cyl=%d heads=%d sectors=%d",
+		
+		dprintf(("Geometry: cyl=%d heads=%d sectors=%d",
 					blk_config.geometry.cylinders,
 					blk_config.geometry.heads,
 					blk_config.geometry.sectors));
 	}
 
 	if (virtio_host_supports(config, VIRTIO_BLK_F_SIZE_MAX))
-		dprintf(V_INFO, ("Has size max"));
+		dprintf(("Has size max"));
 
 	if (virtio_host_supports(config, VIRTIO_BLK_F_FLUSH))
-		dprintf(V_INFO, ("Has flush"));
+		dprintf(("Has flush"));
 
 	if (virtio_host_supports(config, VIRTIO_BLK_F_BLK_SIZE)) {
 		blk_config.blk_size = virtio_sread32(config, 20);
-		dprintf(V_INFO, ("Block Size: %d", blk_config.blk_size));
+		dprintf(("Block Size: %d", blk_config.blk_size));
 	}
 
 	if (virtio_host_supports(config, VIRTIO_BLK_F_BARRIER))
-		dprintf(V_INFO, ("Has barrier"));
+		dprintf(("Has barrier"));
 
 	return 0;
 }
@@ -543,7 +531,7 @@ virtio_blk_config(struct virtio_config *cfg, struct virtio_blk_config *blk_cfg)
 
 	/* If this gets truncated, you have a big disk... */
 	size_mbs = (u32_t)(blk_cfg->capacity * 512 / 1024 / 1024);
-	dprintf(V_INFO, ("Capacity: %d MB", size_mbs));
+	dprintf(("Capacity: %d MB", size_mbs));
 
 	/* do feature setup */
 	virtio_blk_feature_setup();
@@ -584,7 +572,7 @@ static void
 sef_cb_signal_handler(int signo)
 {
 	if (signo == SIGTERM) {
-		dprintf(V_INFO, ("Terminating..."));
+		dprintf(("Terminating..."));
 		virtio_reset_device(config);
 		exit(0);
 	}
