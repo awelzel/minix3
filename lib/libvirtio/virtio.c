@@ -423,64 +423,76 @@ clear_indirect_table(struct virtio_config *cfg, struct vring_desc *vd)
 	for (i = 0; i < cfg->num_indirect; i++) {
 		desc = &cfg->indirect[i];
 
-		if (desc->paddr == vd->addr)
+		if (desc->paddr == vd->addr) {
+			assert(desc->in_use);
+			desc->in_use = 0;
 			break;
+		}
 	}
 
 	if (i >= cfg->num_indirect)
 		panic("%s: Could not clear indirect descriptor table ");
+}
 
-	assert(desc->in_use);
-	desc->in_use = 0;
-	vd->addr = 0;
+
+static void inline
+use_vring_desc(struct vring_desc *vd, struct vumap_phys *vp)
+{
+	vd->addr = vp->vp_addr & ~1UL;
+	vd->len = vp->vp_size;
+	vd->flags = VRING_DESC_F_NEXT;
+
+	if (vp->vp_addr & 1)
+		vd->flags |= VRING_DESC_F_WRITE;
 }
 
 static void
 set_indirect_descriptors(struct virtio_config *cfg, struct virtio_queue *q,
 	struct vumap_phys *bufs, size_t num)
 {
+	/* Indirect descriptor tables are simply filled from left to right */
 	int i;
 	struct indirect_desc_table *desc;
 	struct vring *vring = &q->vring;
 	struct vring_desc *vd, *ivd;
 
+	/* Find the first unused indirect descriptor table */
 	for (i = 0; i < cfg->num_indirect; i++) {
 		desc = &cfg->indirect[i];
 
-		if (!desc->in_use)
+		/* If an unused indirect descriptor table was found,
+		 * mark it as being used and exit the loop.
+		 */
+		if (!desc->in_use) {
+			desc->in_use = 1;
 			break;
+		}
 	}
 
+	/* Sanity check */
 	if (i >= cfg->num_indirect)
 		panic("%s: No indirect descriptor tables left");
 
-	desc->in_use = 1;
-
-	/* For indirect, we only need a single descriptor */
+	/* For indirect descriptor tables, only a single descriptor from
+	 * the main ring is used.
+	 */
 	vd = &vring->desc[q->free_head];
 	vd->flags = VRING_DESC_F_INDIRECT;
 	vd->addr = desc->paddr;
 	vd->len = num * sizeof(desc->descs[0]);
 
+	/* Initialize the descriptors in the indirect descriptor table */
 	for (i = 0; i < num; i++) {
 		ivd = &desc->descs[i];
 
-		ivd->addr = bufs[i].vp_addr & (~1UL);
-		ivd->len = bufs[i].vp_size;
-
-		ivd->flags = VRING_DESC_F_NEXT;
+		use_vring_desc(ivd, &bufs[i]);
 		ivd->next = i + 1;
-
-		/* If writable, set descriptor flag accordingsly */
-		if (bufs[i].vp_addr & 1)
-			ivd->flags |= VRING_DESC_F_WRITE;
 	}
 
-	/* Unset the next bit in the last descriptor */
+	/* Unset the next bit of the last descriptor */
 	ivd->flags = ivd->flags & ~VRING_DESC_F_NEXT;
-	ivd->next = 0;
 
-	/* Update queue */
+	/* Update queue, only a single descriptor was used */
 	q->free_num -= 1;
 	q->free_head = vd->next;
 }
@@ -504,18 +516,7 @@ set_direct_descriptors(struct virtio_queue *q, struct vumap_phys *bufs,
 		 */
 		assert(vd->flags & VRING_DESC_F_NEXT);
 
-		/* Unset the last bit as it is used for writable */
-		vd->addr = bufs[count].vp_addr & (~1UL);
-		assert(!(vd->addr & 1));
-		vd->len = bufs[count].vp_size;
-
-		/* Reset flags */
-		vd->flags = VRING_DESC_F_NEXT;
-
-		/* If writable, set descriptor flag accordingsly */
-		if (bufs[count].vp_addr & 1)
-			vd->flags |= VRING_DESC_F_WRITE;
-
+		use_vring_desc(vd, &bufs[count]);
 		i = vd->next;
 	}
 
@@ -528,8 +529,8 @@ set_direct_descriptors(struct virtio_queue *q, struct vumap_phys *bufs,
 }
 
 int
-virtio_to_queue(struct virtio_config *cfg, int qidx,
-			struct vumap_phys *bufs, size_t num, void *data)
+virtio_to_queue(struct virtio_config *cfg, int qidx, struct vumap_phys *bufs,
+	size_t num, void *data)
 {
 	u16_t free_first;
 	int left;
