@@ -8,17 +8,11 @@
 #include <minix/blockdriver_mt.h>
 #include <minix/drvlib.h>
 #include <minix/virtio.h>
+#include <minix/sysutil.h>
 
 #include <sys/ioc_disk.h>
-#include <sys/mman.h>
 
 #include "virtio_blk.h"
-
-
-/*
- * # mknod /dev/c2d0
- * # service up virtio_blk -dev /dev/c2d0 -devstyle STYLE_DEV
- */
 
 /* From AHCI driver, currently ony V_INFO is used all the time */
 enum {
@@ -29,12 +23,11 @@ enum {
 	V_REQ	/* detailed information about requests */
 };
 
-#define dprintf(v,s) while (verbosity>= (v)) {				\
-		printf("%s: ", name);					\
-		printf s;						\
-		printf("\n");						\
-		break;	/* unconditional break */			\
-}
+#define dprintf(v,s) do {					\
+	printf("%s: ", name);					\
+	printf s;						\
+	printf("\n");						\
+} while (0);
 
 struct virtio_feature blkf[] = {
 	/* name ,	bit,			host,	guest	*/
@@ -50,38 +43,34 @@ struct virtio_feature blkf[] = {
 	{ "idbytes",	VIRTIO_BLK_ID_BYTES,	0,	0	}
 };
 
-static unsigned int spurious_interrupts = 0;
+static const char *const name = "virtio-blk";
+static struct virtio_blk_config blk_config;
+static struct virtio_config *config;
+
+static int spurious_interrupt = 0;
 
 static int open_count = 0;
 
-static int verbosity = 4;		/* verbosity level (0..4) */
+#define VIRTIO_BLK_SUB_PER_DRIVE	(NR_PARTITIONS * NR_PARTITIONS)
+#define VIRTIO_BLK_BLOCK_SIZE		512
 
-static struct virtio_blk_config blk_config;
-static const char *const name = "virtio-blk";
-struct virtio_config *config;
+#define VIRTIO_BLK_NUM_THREADS		4
 
-#define MAX_DRIVES			1
-#define SUB_PER_DRIVE			(NR_PARTITIONS * NR_PARTITIONS)
-#define VIRTIO_BLK_SIZE			512
-
-/* Actually, I think it "should" work */
-#define NUM_THREADS			4
-
-struct device part[DEV_PER_DRIVE];	/* partition */
-struct device subpart[SUB_PER_DRIVE];	/* subpartitions */
+struct device part[DEV_PER_DRIVE];			/* partition */
+struct device subpart[VIRTIO_BLK_SUB_PER_DRIVE];	/* subpartitions */
 
 
 /* Use for actual requests */
-static struct virtio_blk_outhdr hdrs[NUM_THREADS];
+static struct virtio_blk_outhdr hdrs[VIRTIO_BLK_NUM_THREADS];
 
 /* So usually a status is only one byte, but we have
  * some alignment issues if we dont take 2 bytes.
  */
-static u16_t status[NUM_THREADS];
+static u16_t status[VIRTIO_BLK_NUM_THREADS];
 
 /* Physical addresses */
-static struct vumap_phys umap_hdrs[NUM_THREADS];
-static struct vumap_phys umap_status[NUM_THREADS];
+static struct vumap_phys umap_hdrs[VIRTIO_BLK_NUM_THREADS];
+static struct vumap_phys umap_status[VIRTIO_BLK_NUM_THREADS];
 
 /* Prototypes */
 static int virtio_open(dev_t minor, int access);
@@ -122,9 +111,9 @@ virtio_open(dev_t minor, int access)
 	if (open_count == 0) {
 		memset(part, 0, sizeof(part));
 		memset(subpart, 0, sizeof(subpart));
-		part[0].dv_size = blk_config.capacity * VIRTIO_BLK_SIZE;
+		part[0].dv_size = blk_config.capacity * VIRTIO_BLK_BLOCK_SIZE;
 		partition(&virtio_blk_dtab, 0, P_PRIMARY, 0 /* ATAPI */);
-		blockdriver_mt_set_workers(0, NUM_THREADS);
+		blockdriver_mt_set_workers(0, VIRTIO_BLK_NUM_THREADS);
 	}
 
 	open_count++;
@@ -143,8 +132,8 @@ virtio_close(dev_t minor)
 }
 
 static int
-check_addr_set_write_perm(struct vumap_vir *vir, struct vumap_phys *phys, int cnt,
-	int write)
+check_addr_set_write_perm(struct vumap_vir *vir, struct vumap_phys *phys,
+	int cnt, int write)
 {
 
 	for (int i = 0; i < cnt ; i++) {
@@ -171,8 +160,8 @@ check_addr_set_write_perm(struct vumap_vir *vir, struct vumap_phys *phys, int cn
 }
 
 static int
-prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir, iovec_s_t *iv, int cnt,
-	vir_bytes *size)
+prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir, iovec_s_t *iv,
+	int cnt, vir_bytes *size)
 {
 	/* This is pretty much the same as sum_iovec from AHCI,
 	 * except that we don't support any iovecs where the size
@@ -182,7 +171,7 @@ prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir, iovec_s_t *iv, int cnt,
 	for (int i = 0; i < cnt; i++) {
 		tmp = iv[i].iov_size;
 
-		if (tmp == 0 || (tmp % VIRTIO_BLK_SIZE) || tmp > LONG_MAX) {
+		if (tmp == 0 || (tmp % VIRTIO_BLK_BLOCK_SIZE) || tmp > LONG_MAX) {
 			dprintf(V_ERR, ("bad iv[%d].iov_size (%lu) from %d", i, tmp,
 									     endpt));
 			return EINVAL;
@@ -239,7 +228,7 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 		return EINVAL;
 
 	/* position greater than capacity? */
-	if (position >= blk_config.capacity * VIRTIO_BLK_SIZE)
+	if (position >= blk_config.capacity * VIRTIO_BLK_BLOCK_SIZE)
 		return 0;
 
 	dv = virtio_part(minor);
@@ -254,13 +243,13 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	/* Hmmm, AHCI tries to fix this up, but lets just say everything
 	 * needs to be sector (512 byte ) aligned...
 	 */
-	if (position % VIRTIO_BLK_SIZE) {
+	if (position % VIRTIO_BLK_BLOCK_SIZE) {
 		dprintf(V_ERR, ("Non sector-aligned access [%08x%08x]",
 				(u32_t)(position >> 32), (u32_t)position));
 		return EINVAL;
 	}
 
-	sector = position / VIRTIO_BLK_SIZE;
+	sector = position / VIRTIO_BLK_BLOCK_SIZE;
 
 	r = prepare_vir_vec(endpt, vir, iv, cnt, &size);
 
@@ -295,7 +284,7 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 		size_tmp -= (size_tmp - size);
 	}
 
-	if (size % VIRTIO_BLK_SIZE) {
+	if (size % VIRTIO_BLK_BLOCK_SIZE) {
 		dprintf(V_ERR, ("non-sector sized read (%lu) from %d",
 				size, endpt))
 		return EINVAL;
@@ -440,15 +429,9 @@ virtio_intr(unsigned int UNUSED(irqs))
 			/* Wake up the responsible thread */
 			blockdriver_mt_wakeup(*ret_tid);
 		}
-
-	} else {
-
-		if ((spurious_interrupts % 1024) == 0) {
-			dprintf(V_INFO, ("#spurious interrupts=%d",
-					spurious_interrupts));
-		}
-
-		spurious_interrupts += 1;
+	} else if (!spurious_interrupt) {
+		spurious_interrupt = 1;
+		dprintf(V_INFO, ("Got spurious interrupt"));
 	}
 
 	virtio_irq_enable(config);
@@ -471,14 +454,14 @@ static void
 virtio_blk_phys_mapping(void)
 {
 	/* Hack to get the physical addresses of hdr and status */
-	struct vumap_vir virs[NUM_THREADS];
+	struct vumap_vir virs[VIRTIO_BLK_NUM_THREADS];
 
 	int r, cnt, pcnt;
-	pcnt = cnt = NUM_THREADS;
+	pcnt = cnt = VIRTIO_BLK_NUM_THREADS;
 	int access = VUA_READ  | VUA_WRITE;
 
 	/* prepare array for hdr addresses */
-	for (int i = 0; i < NUM_THREADS; i++) {
+	for (int i = 0; i < VIRTIO_BLK_NUM_THREADS; i++) {
 		virs[i].vv_addr = (vir_bytes)&hdrs[i];
 		virs[i].vv_size = sizeof(hdrs[0]);
 	}
@@ -490,13 +473,13 @@ virtio_blk_phys_mapping(void)
 		panic("%s: Unable to map hdrs %d", name, r);
 
 	/* prepare array for status addresses */
-	for (int i = 0; i < NUM_THREADS; i++) {
+	for (int i = 0; i < VIRTIO_BLK_NUM_THREADS; i++) {
 		assert(!((vir_bytes)(&status[i]) & 1));
 		virs[i].vv_addr = (vir_bytes)&status[i];
 		virs[i].vv_size = sizeof(status[0]);
 	}
 
-	pcnt = cnt = NUM_THREADS;
+	pcnt = cnt = VIRTIO_BLK_NUM_THREADS;
 
 	r = sys_vumap(SELF, virs, cnt, 0, access, umap_status, &pcnt);
 
@@ -575,7 +558,7 @@ virtio_blk_probe(void)
 {
 	config = virtio_setup_device(0x00002, name, 1, blkf,
 				     sizeof(blkf) / sizeof(blkf[0]),
-				     NUM_THREADS, 0);
+				     VIRTIO_BLK_NUM_THREADS, 0);
 	if (config == NULL)
 		return ENXIO;
 
