@@ -40,6 +40,8 @@ static struct virtio_config *config;
 
 static int spurious_interrupt = 0;
 
+static int terminating = 0;
+
 static int open_count = 0;
 
 #define VIRTIO_BLK_SUB_PER_DRIVE	(NR_PARTITIONS * NR_PARTITIONS)
@@ -74,6 +76,7 @@ static struct device *virtio_part(dev_t minor);
 static void virtio_geometry(dev_t minor, struct partition *entry);
 static void virtio_intr(unsigned int UNUSED(irqs));
 static int virtio_device(dev_t minor, device_id_t *id);
+static void virtio_terminate(void);
 
 
 static struct blockdriver virtio_blk_dtab  = {
@@ -118,6 +121,9 @@ virtio_close(dev_t minor)
 		return EINVAL;
 
 	open_count--;
+
+	if (open_count == 0 && terminating)
+		virtio_terminate();
 
 	return OK;
 }
@@ -438,6 +444,17 @@ virtio_device(dev_t minor, device_id_t *id)
 }
 
 static void
+virtio_terminate(void)
+{
+	/* Don't terminate if still opened */
+	if (open_count > 0)
+		return;
+
+	virtio_reset_device(config);
+	blockdriver_mt_terminate();
+}
+
+static void
 virtio_blk_phys_mapping(void)
 {
 	/* Hack to get the physical addresses of hdr and status */
@@ -572,9 +589,8 @@ static void
 sef_cb_signal_handler(int signo)
 {
 	if (signo == SIGTERM) {
-		dprintf(("Terminating..."));
-		virtio_reset_device(config);
-		exit(0);
+		terminating = 1;
+		virtio_terminate();
 	}
 }
 
