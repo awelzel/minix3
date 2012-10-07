@@ -1,7 +1,4 @@
-/*
- * Poor man's approach to virtio-blk
- */
-
+/* virtio block driver for MINIX 3, A. Welzel */
 #include <assert.h>
 
 #include <minix/drivers.h>
@@ -18,10 +15,14 @@
 	printf("%s: ", name);					\
 	printf s;						\
 	printf("\n");						\
-} while (0);
+} while (0)
+
+/* virtio specific information */
+static const char *const name = "virtio-blk";
+static struct virtio_blk_config blk_config;
+static struct virtio_config *config;
 
 struct virtio_feature blkf[] = {
-	/* name ,	bit,			host,	guest	*/
 	{ "barrier",	VIRTIO_BLK_F_BARRIER,	0,	0 	},
 	{ "sizemax",	VIRTIO_BLK_F_SIZE_MAX,	0,	0	},
 	{ "segmax",	VIRTIO_BLK_F_SEG_MAX,	0,	0	},
@@ -34,34 +35,33 @@ struct virtio_feature blkf[] = {
 	{ "idbytes",	VIRTIO_BLK_ID_BYTES,	0,	0	}
 };
 
-static const char *const name = "virtio-blk";
-static struct virtio_blk_config blk_config;
-static struct virtio_config *config;
-
-static int spurious_interrupt = 0;
-
-static int terminating = 0;
-
-static int open_count = 0;
-
-#define VIRTIO_BLK_SUB_PER_DRIVE	(NR_PARTITIONS * NR_PARTITIONS)
-#define VIRTIO_BLK_BLOCK_SIZE		512
-
+/* Number of threads to use */
 #define VIRTIO_BLK_NUM_THREADS		4
 
-struct device part[DEV_PER_DRIVE];			/* partition */
-struct device subpart[VIRTIO_BLK_SUB_PER_DRIVE];	/* subpartitions */
+/* State information */
+static int spurious_interrupt = 0;
+static int terminating = 0;
+static int open_count = 0;
 
+/* Partition magic */
+#define VIRTIO_BLK_SUB_PER_DRIVE	(NR_PARTITIONS * NR_PARTITIONS)
+#define VIRTIO_BLK_BLOCK_SIZE		512
+struct device part[DEV_PER_DRIVE];
+struct device subpart[VIRTIO_BLK_SUB_PER_DRIVE];
 
-/* Use for actual requests */
+/* Headers for requests */
 static struct virtio_blk_outhdr hdrs[VIRTIO_BLK_NUM_THREADS];
 
-/* So usually a status is only one byte, but we have
- * some alignment issues if we dont take 2 bytes.
+/* 
+ * Status bytes for requests.
+ *
+ * Usually a status is only one byte in length, but we
+ * need to align them on a word boundary, so lets just
+ * take two bytes.
  */
 static u16_t status[VIRTIO_BLK_NUM_THREADS];
 
-/* Physical addresses */
+/* Physical addresses of headers and status */
 static struct vumap_phys umap_hdrs[VIRTIO_BLK_NUM_THREADS];
 static struct vumap_phys umap_status[VIRTIO_BLK_NUM_THREADS];
 
@@ -82,7 +82,7 @@ static int virtio_status2error(u8_t status);
 static void virtio_device_intr(void);
 static void virtio_spurious_intr(void);
 
-
+/* libblockdriver driver tab */
 static struct blockdriver virtio_blk_dtab  = {
 	BLOCKDRIVER_TYPE_DISK,
 	virtio_open,
@@ -110,8 +110,8 @@ virtio_open(dev_t minor, int access)
 		memset(part, 0, sizeof(part));
 		memset(subpart, 0, sizeof(subpart));
 		part[0].dv_size = blk_config.capacity * VIRTIO_BLK_BLOCK_SIZE;
-		blockdriver_mt_set_workers(0, VIRTIO_BLK_NUM_THREADS);
 		partition(&virtio_blk_dtab, 0, P_PRIMARY, 0 /* ATAPI */);
+		blockdriver_mt_set_workers(0, VIRTIO_BLK_NUM_THREADS);
 	}
 
 	open_count++;
@@ -306,9 +306,6 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	hdrs[tid].ioprio = 0;
 	hdrs[tid].sector = sector;
 
-	/* Set status to "failure" */
-	status[tid] = 0xFFFF;
-
 	/* First the header */
 	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
 	phys[0].vp_size = sizeof(hdrs[0]);
@@ -361,12 +358,11 @@ virtio_ioctl(dev_t minor, unsigned int req, endpoint_t endpt,
 	return EINVAL;
 }
 
-
 static struct device *
 virtio_part(dev_t minor)
 {
-	/* There's only a single drive attached to this
-	 * controller, so take some shortcuts.
+	/* There's only a single drive attached to this,
+	 * lets take some shortcuts.
 	 */
 
 	/* Take care of d0 d0p0 ... */
@@ -410,7 +406,7 @@ virtio_device_intr(void)
 {
 	thread_id_t *tid;
 
-	/* More than a single request might have finished */
+	/* Multiple requests might have finished */
 	while (!virtio_from_queue(config, 0, (void**)&tid))
 		blockdriver_mt_wakeup(*tid);
 }
@@ -466,10 +462,11 @@ virtio_flush(void)
 
 	/* Prepare the header */
 	memset(&hdrs[tid], 0, sizeof(hdrs[0]));
-	hdrs[tid].type = VIRTIO_BLK_T_FLUSH | VIRTIO_BLK_T_BARRIER;
+	hdrs[tid].type = VIRTIO_BLK_T_FLUSH;
 
-	/* Set status to "failure" */
-	status[tid] = 0xFFFF;
+	/* Let this be a barrier if the host supports it */
+	if (virtio_host_supports(config, VIRTIO_BLK_F_BARRIER))
+		hdrs[tid].type |= VIRTIO_BLK_T_BARRIER;
 
 	/* Header and status for the queue */
 	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
@@ -521,26 +518,26 @@ virtio_status2error(u8_t status)
 static void
 virtio_blk_phys_mapping(void)
 {
-	/* Hack to get the physical addresses of hdr and status */
+	/* Map headers and status to physcal addresses */
 	struct vumap_vir virs[VIRTIO_BLK_NUM_THREADS];
 
 	int r, cnt, pcnt;
 	pcnt = cnt = VIRTIO_BLK_NUM_THREADS;
 	int access = VUA_READ  | VUA_WRITE;
 
-	/* prepare array for hdr addresses */
+	/* Prepare array for hdr addresses */
 	for (int i = 0; i < VIRTIO_BLK_NUM_THREADS; i++) {
 		virs[i].vv_addr = (vir_bytes)&hdrs[i];
 		virs[i].vv_size = sizeof(hdrs[0]);
 	}
 
-	/* make the call */
+	/* Do the mapping */
 	r = sys_vumap(SELF, virs, cnt, 0, access, umap_hdrs, &pcnt);
 
 	if (r != OK)
 		panic("%s: Unable to map hdrs %d", name, r);
 
-	/* prepare array for status addresses */
+	/* Same for status addresses */
 	for (int i = 0; i < VIRTIO_BLK_NUM_THREADS; i++) {
 		assert(!((vir_bytes)(&status[i]) & 1));
 		virs[i].vv_addr = (vir_bytes)&status[i];
@@ -586,7 +583,7 @@ virtio_blk_feature_setup(void)
 		dprintf(("Has size max"));
 
 	if (virtio_host_supports(config, VIRTIO_BLK_F_FLUSH))
-		dprintf(("Has flush"));
+		dprintf(("Supports flushing"));
 
 	if (virtio_host_supports(config, VIRTIO_BLK_F_BLK_SIZE)) {
 		blk_config.blk_size = virtio_sread32(config, 20);
@@ -594,7 +591,7 @@ virtio_blk_feature_setup(void)
 	}
 
 	if (virtio_host_supports(config, VIRTIO_BLK_F_BARRIER))
-		dprintf(("Has barrier"));
+		dprintf(("Supports barrier"));
 
 	return 0;
 }
@@ -608,7 +605,6 @@ virtio_blk_config(struct virtio_config *cfg, struct virtio_blk_config *blk_cfg)
 	sectors_low = virtio_sread32(cfg, 0);
 	sectors_high = virtio_sread32(cfg, 4);
 	blk_cfg->capacity = ((u64_t)sectors_high << 32) | sectors_low;
-
 
 	/* If this gets truncated, you have a big disk... */
 	size_mbs = (u32_t)(blk_cfg->capacity * 512 / 1024 / 1024);
@@ -676,11 +672,11 @@ main(int argc, char **argv)
 {
 	env_setargs(argc, argv);
 	sef_local_startup();
+
 	blockdriver_mt_task(&virtio_blk_dtab);
 
-	/* I think this is never reached... */
 	virtio_terminate();
 
-	/* This is def. not reached */
+	/* Never reached */
 	return OK;
 }
