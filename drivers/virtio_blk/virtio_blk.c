@@ -1,4 +1,4 @@
-/* 
+/*
  * Poor man's approach to virtio-blk
  */
 
@@ -70,13 +70,17 @@ static int virtio_open(dev_t minor, int access);
 static int virtio_close(dev_t minor);
 static ssize_t virtio_transfer(dev_t minor, int do_write, u64_t position,
 	endpoint_t endpt, iovec_t *iovec, unsigned int count, int flags);
-static int virtio_ioctl(dev_t minor, unsigned int request, endpoint_t endpt,
+static int virtio_ioctl(dev_t minor, unsigned int req, endpoint_t endpt,
 	cp_grant_id_t grant);
 static struct device *virtio_part(dev_t minor);
 static void virtio_geometry(dev_t minor, struct partition *entry);
 static void virtio_intr(unsigned int UNUSED(irqs));
 static int virtio_device(dev_t minor, device_id_t *id);
+static int virtio_flush(void);
 static void virtio_terminate(void);
+static int virtio_status2error(u8_t status);
+static void virtio_device_intr(void);
+static void virtio_spurious_intr(void);
 
 
 static struct blockdriver virtio_blk_dtab  = {
@@ -106,8 +110,8 @@ virtio_open(dev_t minor, int access)
 		memset(part, 0, sizeof(part));
 		memset(subpart, 0, sizeof(subpart));
 		part[0].dv_size = blk_config.capacity * VIRTIO_BLK_BLOCK_SIZE;
-		partition(&virtio_blk_dtab, 0, P_PRIMARY, 0 /* ATAPI */);
 		blockdriver_mt_set_workers(0, VIRTIO_BLK_NUM_THREADS);
+		partition(&virtio_blk_dtab, 0, P_PRIMARY, 0 /* ATAPI */);
 	}
 
 	open_count++;
@@ -122,6 +126,10 @@ virtio_close(dev_t minor)
 
 	open_count--;
 
+	/* If fully closed, flush the device */
+	if (open_count == 0)
+		virtio_flush();
+
 	if (open_count == 0 && terminating)
 		virtio_terminate();
 
@@ -129,10 +137,8 @@ virtio_close(dev_t minor)
 }
 
 static int
-check_addr_set_write_perm(struct vumap_vir *vir, struct vumap_phys *phys,
-	int cnt, int write)
+prepare_bufs(struct vumap_vir *vir, struct vumap_phys *phys, int cnt, int w)
 {
-
 	for (int i = 0; i < cnt ; i++) {
 
 		/* So you gave us a byte aligned buffer? Good job! */
@@ -148,7 +154,7 @@ check_addr_set_write_perm(struct vumap_vir *vir, struct vumap_phys *phys,
 		}
 
 		/* If write, the buffers only need to be read */
-		phys[i].vp_addr |= !write;
+		phys[i].vp_addr |= !w;
 	}
 
 	return OK;
@@ -216,7 +222,7 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	iovec_s_t *iv = (iovec_s_t *)iovec;
 	int access = write ? VUA_READ : VUA_WRITE;
 
-	/* Don't touch this one anymore */
+	/* Make sure we don't touch this one anymore */
 	iovec = NULL;
 
 	if (cnt > NR_IOREQS)
@@ -291,23 +297,6 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 		return r;
 	}
 
-	/* First the header */
-	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
-	phys[0].vp_size = sizeof(hdrs[0]);
-
-	r = check_addr_set_write_perm(vir, &phys[1], pcnt, write);
-
-	if (r != OK)
-		return r;
-
-	/* Put the status at the end */
-	phys[pcnt + 1].vp_addr = umap_status[tid].vp_addr;
-	phys[pcnt + 1].vp_size = sizeof(u8_t);
-	assert(!(phys[pcnt +  1].vp_addr & 1));
-
-	/* Status always needs write access */
-	phys[1 + pcnt].vp_addr |= 1;
-
 	/* Prepare the header */
 	if (write)
 		hdrs[tid].type = VIRTIO_BLK_T_OUT;
@@ -317,9 +306,23 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	hdrs[tid].ioprio = 0;
 	hdrs[tid].sector = sector;
 
-
 	/* Set status to "failure" */
 	status[tid] = 0xFFFF;
+
+	/* First the header */
+	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
+	phys[0].vp_size = sizeof(hdrs[0]);
+
+	/* Put the physical buffers into phys */
+	if ((r = prepare_bufs(vir, &phys[1], pcnt, write)) != OK)
+		return r;
+
+	/* Put the status at the end */
+	phys[pcnt + 1].vp_addr = umap_status[tid].vp_addr;
+	phys[pcnt + 1].vp_size = sizeof(u8_t);
+
+	/* Status always needs write access */
+	phys[1 + pcnt].vp_addr |= 1;
 
 	/* Send addresses to queue */
 	virtio_to_queue(config, 0, phys, 2 + pcnt, &tid);
@@ -327,36 +330,31 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	/* Wait for completion */
 	blockdriver_mt_sleep();
 
-	/* Check status, only the lower 8 bits */
-	if (status[tid] & 0xFF) {
-		dprintf(("ERR status=%02x", status[tid] & 0xFF));
-		dprintf(("ERR sector=%u size=%lx w=%d cnt=%d tid=%d",
-			(u32_t) sector, size, write, pcnt, tid));
+	/* All was good */
+	if ((status[tid] & 0xFF) == VIRTIO_BLK_S_OK)
+		return size;
 
-		return EIO;
-	}
+	/* Error path */
+	dprintf(("ERROR status=%02x sector=%llu len=%lx cnt=%d op=%s t=%d",
+		 status[tid] & 0xFF, sector, size,
+		 pcnt, write ? "write" : "read",
+		 tid));
 
-	return size;
+	return virtio_status2error(status[tid] & 0xFF);
 }
 
 static int
-virtio_ioctl(dev_t minor, unsigned int request, endpoint_t endpt,
+virtio_ioctl(dev_t minor, unsigned int req, endpoint_t endpt,
 	cp_grant_id_t grant)
 {
-	switch (request) {
+	switch (req) {
 
 	case DIOCOPENCT:
 		return sys_safecopyto(endpt, grant, 0,
 			(vir_bytes) &open_count, sizeof(open_count));
 
 	case DIOCFLUSH:
-		if (!virtio_host_supports(config, VIRTIO_BLK_F_FLUSH)) {
-
-			/* TODO: Implement */
-			return EIO;
-		}
-
-		dprintf(("Host has no flush support"));
+		return virtio_flush();
 
 	}
 
@@ -408,24 +406,34 @@ virtio_geometry(dev_t minor, struct partition *entry)
 }
 
 static void
+virtio_device_intr(void)
+{
+	thread_id_t *tid;
+
+	/* More than a single request might have finished */
+	while (!virtio_from_queue(config, 0, (void**)&tid))
+		blockdriver_mt_wakeup(*tid);
+}
+
+static void
+virtio_spurious_intr(void)
+{
+	/* Output a single message about spurious interrupts */
+	if (spurious_interrupt)
+		return;
+
+	dprintf(("Got spurious interrupt"));
+	spurious_interrupt = 1;
+}
+
+static void
 virtio_intr(unsigned int UNUSED(irqs))
 {
-	thread_id_t *ret_tid;
 
-	if (virtio_had_irq(config)) {
-
-		/* Multiple requests might have finished for a single
-		 * interrupt.
-		 */
-		while (!virtio_from_queue(config, 0, (void**)&ret_tid)) {
-
-			/* Wake up the responsible thread */
-			blockdriver_mt_wakeup(*ret_tid);
-		}
-	} else if (!spurious_interrupt) {
-		spurious_interrupt = 1;
-		dprintf(("Got spurious interrupt"));
-	}
+	if (virtio_had_irq(config))
+		virtio_device_intr();
+	else
+		virtio_spurious_intr();
 
 	virtio_irq_enable(config);
 }
@@ -443,6 +451,50 @@ virtio_device(dev_t minor, device_id_t *id)
 	return OK;
 }
 
+static int
+virtio_flush(void)
+{
+	struct vumap_phys phys[2];
+	size_t phys_cnt = sizeof(phys) / sizeof(phys[0]);
+
+	/* Which thread is doing this request? */
+	thread_id_t tid = blockdriver_mt_get_tid();
+
+	/* Host may not support flushing */
+	if (!virtio_host_supports(config, VIRTIO_BLK_F_FLUSH))
+		return EOPNOTSUPP;
+
+	/* Prepare the header */
+	memset(&hdrs[tid], 0, sizeof(hdrs[0]));
+	hdrs[tid].type = VIRTIO_BLK_T_FLUSH | VIRTIO_BLK_T_BARRIER;
+
+	/* Set status to "failure" */
+	status[tid] = 0xFFFF;
+
+	/* Header and status for the queue */
+	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
+	phys[0].vp_size = sizeof(hdrs[0]);
+	phys[1].vp_addr = umap_status[tid].vp_addr;
+	phys[1].vp_size = sizeof(u8_t);
+
+	/* Status always needs write access */
+	phys[1].vp_addr |= 1;
+
+	/* Send flush request to queue */
+	virtio_to_queue(config, 0, phys, phys_cnt, &tid);
+
+	blockdriver_mt_sleep();
+
+	/* All was good */
+	if ((status[tid] & 0xFF) == VIRTIO_BLK_S_OK)
+		return OK;
+
+	/* Error path */
+	dprintf(("ERROR status=%02x op=flush t=%d", status[tid] & 0xFF, tid));
+
+	return virtio_status2error(status[tid] & 0xFF);
+}
+
 static void
 virtio_terminate(void)
 {
@@ -451,7 +503,19 @@ virtio_terminate(void)
 		return;
 
 	virtio_reset_device(config);
-	blockdriver_mt_terminate();
+	exit(0);
+}
+
+static int
+virtio_status2error(u8_t status)
+{
+	/* Convert a status from the host to an error */
+	if (status == VIRTIO_BLK_S_IOERR)
+		return EIO;
+	else if (status == VIRTIO_BLK_S_UNSUPP)
+		return ENOTSUP;
+
+	panic("%s: unknown status from host: %02x", name, status);
 }
 
 static void
@@ -511,7 +575,7 @@ virtio_blk_feature_setup(void)
 		blk_config.geometry.cylinders = virtio_sread16(config, 16);
 		blk_config.geometry.heads= virtio_sread8(config, 18);
 		blk_config.geometry.sectors = virtio_sread8(config, 19);
-		
+
 		dprintf(("Geometry: cyl=%d heads=%d sectors=%d",
 					blk_config.geometry.cylinders,
 					blk_config.geometry.heads,
@@ -588,10 +652,12 @@ sef_cb_init_fresh(int type, sef_init_info_t *UNUSED(info))
 static void
 sef_cb_signal_handler(int signo)
 {
-	if (signo == SIGTERM) {
-		terminating = 1;
-		virtio_terminate();
-	}
+	/* Ignore all signal but SIGTERM */
+	if (signo != SIGTERM)
+		return;
+
+	terminating = 1;
+	virtio_terminate();
 }
 
 static void
@@ -611,5 +677,10 @@ main(int argc, char **argv)
 	env_setargs(argc, argv);
 	sef_local_startup();
 	blockdriver_mt_task(&virtio_blk_dtab);
+
+	/* I think this is never reached... */
+	virtio_terminate();
+
+	/* This is def. not reached */
 	return OK;
 }
