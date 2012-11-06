@@ -17,6 +17,7 @@ EXTRA=system.conf master.passwd rs.single
 
 .if ${MKSMALL} != "yes"
 PROG_DRIVERS+= ahci
+PROG_DRIVERS+= virtio_blk
 PROG_SERVERS+= ext2
 PROTO= proto
 .else
