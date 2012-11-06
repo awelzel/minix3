@@ -619,11 +619,11 @@ virtio_blk_config(struct virtio_config *cfg, struct virtio_blk_config *blk_cfg)
 }
 
 static int
-virtio_blk_probe(void)
+virtio_blk_probe(int skip)
 {
 	config = virtio_setup_device(0x00002, name, 1, blkf,
 				     sizeof(blkf) / sizeof(blkf[0]),
-				     VIRTIO_BLK_NUM_THREADS, 0);
+				     VIRTIO_BLK_NUM_THREADS, skip);
 	if (config == NULL)
 		return ENXIO;
 
@@ -634,10 +634,15 @@ virtio_blk_probe(void)
 	return OK;
 }
 
+
 static int
 sef_cb_init_fresh(int type, sef_init_info_t *UNUSED(info))
 {
-	if (virtio_blk_probe() != OK)
+	long instance = 0;
+
+	env_parse("instance", "d", 0, &instance, 0, 255);
+
+	if (virtio_blk_probe((int)instance) != OK)
 		panic("%s: No device found", name);
 
 	blockdriver_announce(type);
