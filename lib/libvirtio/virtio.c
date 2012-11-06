@@ -128,7 +128,7 @@ virtio_setup_device(u16_t subdevid, const char *name, int num_queues,
 		r = pci_next_dev(&devind, &vid, &did);
 	}
 
-	/* pci_[first|next_dev()] and return 0 if no device was found */
+	/* pci_[first|next_dev()] return 0 if no device was found */
 	if (r == 0 || skip > 0)
 		return NULL;
 
@@ -155,7 +155,7 @@ virtio_setup_device(u16_t subdevid, const char *name, int num_queues,
 
 	memset(ret->queues, 0, num_queues * sizeof(ret->queues[0]));
 
-	/* see comment */
+	/* see comment in the beginning of this file */
 	ret->num_indirect = threads;
 
 	ret->indirect = malloc(threads * sizeof(ret->indirect[0]));
@@ -681,7 +681,7 @@ virtio_irq_disable(struct virtio_config *cfg)
 {
 	int r;
 	if ((r = sys_irqdisable(&cfg->irq_hook) != OK))
-		panic("%s: Unable to enable IRQ %d", cfg->name, r);
+		panic("%s: Unable to disable IRQ %d", cfg->name, r);
 }
 
 static int
