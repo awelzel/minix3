@@ -122,15 +122,16 @@ virtio_net_config(void)
 {
 	u32_t mac14;
 	u32_t mac56;
+	int i;
 
 	if (virtio_host_supports(dev, VIRTIO_NET_F_MAC)) {
 		dprintf(("Mac set by host: "));
 		mac14 = virtio_sread32(dev, 0);
 		mac56 = virtio_sread32(dev, 4);
 		*(u32_t*)virtio_net_mac = mac14;
-		*(u32_t*)(virtio_net_mac + 4) = mac56;
+		*(u16_t*)(virtio_net_mac + 4) = mac56;
 
-		for (int i = 0; i < 6; i++)
+		for (i = 0; i < 6; i++)
 			printf("%02x%s", virtio_net_mac[i],
 					 i == 5 ? "\n" : ":");
 	} else {
@@ -181,10 +182,11 @@ virtio_net_alloc_bufs(void)
 static void
 virtio_net_init_queues(void)
 {
+	int i;
 	STAILQ_INIT(&free_list);
 	STAILQ_INIT(&recv_list);
 
-	for (int i = 0; i < BUF_PACKETS; i++) {
+	for (i = 0; i < BUF_PACKETS; i++) {
 		packets[i].idx = i;
 		packets[i].vhdr = &hdrs[i];
 		packets[i].phdr = hdrs_phys + i * sizeof(hdrs[i]);
@@ -454,14 +456,14 @@ static void
 virtio_net_conf(message *m)
 {
 	/* TODO: Add the multicast, broadcast filtering etc. */
-	int r;
+	int i, r;
 	
 	message reply;
 	reply.m_type = DL_CONF_REPLY;
 	reply.DL_STAT = OK;
 	reply.DL_COUNT = 0;
 
-	for (int i = 0; i < sizeof(virtio_net_mac); i++)
+	for (i = 0; i < sizeof(virtio_net_mac); i++)
 		((u8_t*)reply.DL_HWADDR)[i] = virtio_net_mac[i];
 	
 	if ((r = send(m->m_source, &reply)) != OK)
