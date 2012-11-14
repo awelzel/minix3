@@ -279,6 +279,8 @@ static phys_bytes alloc_pages(int pages, int memflags)
 static void free_pages(phys_bytes pageno, int npages)
 {
 	int i, lim = pageno + npages - 1;
+	/* Don't put pages below this boundary into the page cache */
+	int low = 4 * 1024 * 1024 / VM_PAGE_SIZE;
 
 #if JUNKFREE
        if(sys_memset(NONE, 0xa5a5a5a5, VM_PAGE_SIZE * pageno,
@@ -288,7 +290,7 @@ static void free_pages(phys_bytes pageno, int npages)
 
 	for(i = pageno; i <= lim; i++) {
 		SET_BIT(free_pages_bitmap, i);
-		if(free_page_cache_size < PAGE_CACHE_MAX) {
+		if(free_page_cache_size < PAGE_CACHE_MAX && i >= low) {
 			free_page_cache[free_page_cache_size++] = i;
 		}
 	}
