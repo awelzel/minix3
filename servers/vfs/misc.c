@@ -299,13 +299,13 @@ int do_sync()
   int r = OK;
 
   for (vmp = &vmnt[0]; vmp < &vmnt[NR_MNTS]; ++vmp) {
+	if ((r = lock_vmnt(vmp, VMNT_EXCL)) != OK)
+		break;
 	if (vmp->m_dev != NO_DEV && vmp->m_fs_e != NONE &&
 		 vmp->m_root_node != NULL) {
-		if ((r = lock_vmnt(vmp, VMNT_EXCL)) != OK)
-			break;
 		req_sync(vmp->m_fs_e);
-		unlock_vmnt(vmp);
 	}
+	unlock_vmnt(vmp);
   }
 
   return(r);
@@ -348,16 +348,33 @@ int do_fsync()
  *===========================================================================*/
 void pm_reboot()
 {
-  /* Perform the VFS side of the reboot call. */
+/* Perform the VFS side of the reboot call. */
   int i;
   struct fproc *rfp;
 
   do_sync();
 
-  /* Do exit processing for all leftover processes and servers,
-   * but don't actually exit them (if they were really gone, PM
-   * will tell us about it).
+  /* Do exit processing for all leftover processes and servers, but don't
+   * actually exit them (if they were really gone, PM will tell us about it).
+   * Skip processes that handle parts of the file system; we first need to give
+   * them the chance to unmount (which should be possible as all normal
+   * processes have no open files anymore).
    */
+  for (i = 0; i < NR_PROCS; i++) {
+	rfp = &fproc[i];
+
+	/* Don't just free the proc right away, but let it finish what it was
+	 * doing first */
+	lock_proc(rfp, 0);
+	if (rfp->fp_endpoint != NONE && find_vmnt(rfp->fp_endpoint) == NULL)
+		free_proc(rfp, 0);
+	unlock_proc(rfp);
+  }
+
+  do_sync();
+  unmount_all(0 /* Don't force */);
+
+  /* Try to exit all processes again including File Servers */
   for (i = 0; i < NR_PROCS; i++) {
 	rfp = &fproc[i];
 
@@ -370,7 +387,8 @@ void pm_reboot()
   }
 
   do_sync();
-  unmount_all();
+  unmount_all(1 /* Force */);
+
 }
 
 /*===========================================================================*

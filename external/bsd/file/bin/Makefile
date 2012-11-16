@@ -11,7 +11,10 @@ FILES=		${MFILES}
 .endif
 
 PROG=		file
-LDADD+=		-L../lib -lmagic -lz
+.if defined(__MINIX)
+LDADD+=		-L../lib
+.endif
+LDADD+=		-lmagic -lz
 DPADD+=		${LIBMAGIC} ${LIBZ}
 MAN=		file.1 magic.5
 

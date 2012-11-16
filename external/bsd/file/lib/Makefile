@@ -1,7 +1,7 @@
 #	$NetBSD: Makefile,v 1.2 2011/08/14 09:06:12 christos Exp $
 #
 
-USE_FORT?= no	# data driven bugs?
+USE_FORT?= yes	# data driven bugs?
 
 .include <bsd.own.mk>
 

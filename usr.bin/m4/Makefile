@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.15 2009/10/26 21:11:28 christos Exp $
+#	$NetBSD: Makefile,v 1.17 2011/08/14 12:59:25 christos Exp $
 #
 #	@(#)Makefile	8.1 (Berkeley) 6/6/93
 
@@ -23,5 +23,8 @@ LDADD+=		-lutil -ll
 tokenizer.o: parser.h
 
 CLEANFILES+=parser.c parser.h tokenizer.o
+
+# LSC Until it compiles cleanly...
+NOGCCERROR:=yes
 
 .include <bsd.prog.mk>

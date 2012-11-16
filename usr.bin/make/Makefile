@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.55 2011/08/14 13:06:09 christos Exp $
+#	$NetBSD: Makefile,v 1.56 2012/05/30 21:54:23 sjg Exp $
 #	@(#)Makefile	5.2 (Berkeley) 12/28/90
 
 PROG=	make
@@ -24,17 +24,22 @@ COPTS.meta.c += -DHAVE_FILEMON_H -I${FILEMON_H:H}
 .endif
 .endif
 
-# For MINIX
+.if defined(__MINIX)
 CPPFLAGS+=	-DHAVE_SETENV -DHAVE_STRERROR -DHAVE_STRDUP \
 		-DHAVE_STRFTIME -DHAVE_VSNPRINTF -DUSE_SELECT
 
 CPPFLAGS+= -DMAKE_MACHINE=\"${MACHINE}\" -DMAKE_MACHINE_ARCH=\"${MACHINE_ARCH}\"
 
+# LSC Until it compiles cleanly...
+NOGCCERROR:=yes
+.endif #defined(__MINIX)
 
 .PATH:	${.CURDIR}/lst.lib
-#.if make(install)
-#SUBDIR=	PSD.doc
-#.endif
+.if !defined(__MINIX)
+.if make(install)
+SUBDIR=	PSD.doc
+.endif
+.endif #!defined(__MINIX)
 .if make(obj) || make(clean)
 SUBDIR+= unit-tests
 .endif
@@ -42,13 +47,13 @@ SUBDIR+= unit-tests
 .include <bsd.prog.mk>
 .include <bsd.subdir.mk>
 
-.ifdef TOOLDIR
 CPPFLAGS+= -DMAKE_NATIVE
 COPTS.var.c += -Wno-cast-qual
 COPTS.job.c += -Wno-format-nonliteral
 COPTS.parse.c += -Wno-format-nonliteral
 COPTS.var.c += -Wno-format-nonliteral
 
+.ifdef TOOLDIR
 # this is a native netbsd build, 
 # use libutil rather than the local emalloc etc.
 CPPFLAGS+= -DUSE_EMALLOC
@@ -58,4 +63,4 @@ DPADD+=${LIBUTIL}
 
 # A simple unit-test driver to help catch regressions
 accept test:
-	cd ${.CURDIR}/unit-tests && ${.MAKE} -r -m / TEST_MAKE=${TEST_MAKE:U${.OBJDIR}/${PROG:T}} ${.TARGET}
+	cd ${.CURDIR}/unit-tests && MAKEFLAGS= ${.MAKE} -r -m / TEST_MAKE=${TEST_MAKE:U${.OBJDIR}/${PROG:T}} ${.TARGET}

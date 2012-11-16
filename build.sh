@@ -1,5 +1,5 @@
 #! /usr/bin/env sh
-#	$NetBSD: build.sh,v 1.254 2012/02/26 20:32:40 tsutsui Exp $
+#	$NetBSD: build.sh,v 1.256 2012/09/29 04:02:42 tsutsui Exp $
 #
 # Copyright (c) 2001-2011 The NetBSD Foundation, Inc.
 # All rights reserved.
@@ -554,6 +554,14 @@ getarch()
 	#
 	case "${MACHINE}" in
 
+	evbearm-e[bl])
+		makewrappermachine=${MACHINE}
+		# MACHINE_ARCH is "arm" or "armeb", not "armel"
+		MACHINE_ARCH=earm${MACHINE##*-}
+		MACHINE_ARCH=${MACHINE_ARCH%el}
+		MACHINE=evbarm
+		;;
+
 	evbarm-e[bl])
 		makewrappermachine=${MACHINE}
 		# MACHINE_ARCH is "arm" or "armeb", not "armel"
@@ -658,6 +666,14 @@ getarch()
 		MACHINE_ARCH=${MACHINE}
 		;;
 
+	i[4-6]86)
+		# LSC FIXME: This is required as uname -m reports the actual machine.
+        # We will be able to remove this once our triple has been cleaned up 
+        # (at this time we compile only for i386, and use an incorrect host triple)
+		MACHINE=i386
+		MACHINE_ARCH=i386
+		;;
+
 	*)
 		bomb "Unknown target MACHINE: ${MACHINE}"
 		;;
@@ -671,7 +687,7 @@ validatearch()
 	#
 	case "${MACHINE_ARCH}" in
 
-	alpha|arm|armeb|hppa|i386|m68000|m68k|mipse[bl]|mips64e[bl]|powerpc|powerpc64|sh3e[bl]|sparc|sparc64|vax|x86_64|ia64)
+	alpha|arm|armeb|earm|earmeb|hppa|i386|m68000|m68k|mipse[bl]|mips64e[bl]|powerpc|powerpc64|sh3e[bl]|sparc|sparc64|vax|x86_64|ia64)
 		;;
 
 	"")
@@ -689,7 +705,11 @@ validatearch()
 	case "${MACHINE}" in
 
 	evbarm)
-		arches="arm armeb"
+		arches="arm armeb earm earmeb"
+		;;
+
+	cats|iyonix|netwinder|shark|zaurus)
+		arches="arm earm"
 		;;
 
 	algor|arc|cobalt|pmax)
@@ -743,6 +763,8 @@ nobomb_getmakevar()
 	"${make}" -m ${TOP}/share/mk -s -B -f- _x_ <<EOF || return 1
 _x_:
 	echo \${$1}
+# LSC FIXME: We are cross compiling, so overwrite default and build tools
+USETOOLS:=yes
 .include <bsd.prog.mk>
 .include <bsd.kernobj.mk>
 EOF
@@ -1196,8 +1218,7 @@ parseoptions()
 	[ -z "${BUILDID}" ] || makeenv="${makeenv} BUILDID"
 	MAKEFLAGS="-de -m ${TOP}/share/mk ${MAKEFLAGS}"
 	MAKEFLAGS="${MAKEFLAGS} MKOBJDIRS=${MKOBJDIRS-yes}"
-	BUILDSH=1
-	export MAKEFLAGS MACHINE MACHINE_ARCH BUILDSH
+	export MAKEFLAGS MACHINE MACHINE_ARCH
 }
 
 # sanitycheck --
@@ -1521,7 +1542,7 @@ validatemakeparams()
 	if [ -z "${DESTDIR}" ] || [ "${DESTDIR}" = "/" ]; then
 		if ${do_build} || ${do_distribution} || ${do_release}; then
 			if ! ${do_build} || \
-			   [ "${uname_s}" != "NetBSD" ] || \
+			   [ "${uname_s}" != "Minix" ] || \
 			   [ "${uname_m}" != "${MACHINE}" ]; then
 				bomb "DESTDIR must != / for cross builds, or ${progname} 'distribution' or 'release'."
 			fi
@@ -1657,7 +1678,7 @@ createmakewrapper()
 	eval cat <<EOF ${makewrapout}
 #! ${HOST_SH}
 # Set proper variables to allow easy "make" building of a NetBSD subtree.
-# Generated from:  \$NetBSD: build.sh,v 1.254 2012/02/26 20:32:40 tsutsui Exp $
+# Generated from:  \$NetBSD: build.sh,v 1.256 2012/09/29 04:02:42 tsutsui Exp $
 # with these arguments: ${_args}
 #
 
@@ -1674,7 +1695,9 @@ EOF
 		eval cat <<EOF
 MAKEWRAPPERMACHINE=${makewrappermachine:-${MACHINE}}; export MAKEWRAPPERMACHINE
 USETOOLS=yes; export USETOOLS
+# LSC We are cross compiling, so do not install to root!
 MKINSTALLBOOT=no; export MKINSTALLBOOT
+MKGCC=yes; export MKGCC
 EOF
 	} | eval sort -u "${makewrapout}"
 	eval cat <<EOF "${makewrapout}"
@@ -1700,10 +1723,10 @@ make_in_dir()
 
 buildtools()
 {
-#	if [ "${MKOBJDIRS}" != "no" ]; then
-#		${runcmd} "${makewrapper}" ${parallel} obj-tools ||
-#		    bomb "Failed to make obj-tools"
-#	fi
+	if [ "${MKOBJDIRS}" != "no" ]; then
+		${runcmd} "${makewrapper}" ${parallel} obj-tools ||
+		    bomb "Failed to make obj-tools"
+	fi
 	if [ "${MKUPDATE}" = "no" ]; then
 		make_in_dir tools cleandir
 	fi
@@ -1809,14 +1832,13 @@ buildmodules()
 
 	statusmsg "Building kernel modules for NetBSD/${MACHINE} ${DISTRIBVER}"
 	if [ "${MKOBJDIRS}" != "no" ]; then
-		make_in_dir sys/modules obj ||
-		    bomb "Failed to make obj in sys/modules"
+		make_in_dir sys/modules obj
 	fi
 	if [ "${MKUPDATE}" = "no" ]; then
 		make_in_dir sys/modules cleandir
 	fi
-	${runcmd} "${makewrapper}" ${parallel} do-sys-modules ||
-	    bomb "Failed to make do-sys-modules"
+	make_in_dir sys/modules dependall
+	make_in_dir sys/modules install
 
 	statusmsg "Successful build of kernel modules for NetBSD/${MACHINE} ${DISTRIBVER}"
 }
@@ -2014,7 +2036,7 @@ main()
 		installmodules=*)
 			arg=${op#*=}
 			if [ "${arg}" = "/" ] && \
-			    (	[ "${uname_s}" != "NetBSD" ] || \
+			    (	[ "${uname_s}" != "Minix" ] || \
 				[ "${uname_m}" != "${MACHINE}" ] ); then
 				bomb "'${op}' must != / for cross builds."
 			fi
@@ -2024,7 +2046,7 @@ main()
 		install=*)
 			arg=${op#*=}
 			if [ "${arg}" = "/" ] && \
-			    (	[ "${uname_s}" != "NetBSD" ] || \
+			    (	[ "${uname_s}" != "Minix" ] || \
 				[ "${uname_m}" != "${MACHINE}" ] ); then
 				bomb "'${op}' must != / for cross builds."
 			fi

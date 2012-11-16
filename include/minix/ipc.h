@@ -163,27 +163,61 @@ int _do_kernel_call_orig(message *m_ptr);
 
 int _minix_kernel_info_struct(struct minix_kerninfo **);
 
+/* Hide names to avoid name space pollution. */
+#define notify          _notify
+#define sendrec         _sendrec
+#define receive         _receive
+#define receivenb       _receivenb
+#define send            _send
+#define sendnb          _sendnb
+#define senda           _senda
+
 struct minix_ipcvecs {
-	int (*send_ptr)(endpoint_t dest, message *m_ptr);
-	int (*receive_ptr)(endpoint_t src, message *m_ptr, int *st);
-	int (*sendrec_ptr)(endpoint_t src_dest, message *m_ptr);
-	int (*sendnb_ptr)(endpoint_t dest, message *m_ptr);
-	int (*notify_ptr)(endpoint_t dest);
-	int (*do_kernel_call_ptr)(message *m_ptr);
-	int (*senda_ptr)(asynmsg_t *table, size_t count);
+	int (*send)(endpoint_t dest, message *m_ptr);
+	int (*receive)(endpoint_t src, message *m_ptr, int *st);
+	int (*sendrec)(endpoint_t src_dest, message *m_ptr);
+	int (*sendnb)(endpoint_t dest, message *m_ptr);
+	int (*notify)(endpoint_t dest);
+	int (*do_kernel_call)(message *m_ptr);
+	int (*senda)(asynmsg_t *table, size_t count);
 };
 
 /* kernel-set IPC vectors retrieved by a constructor in libc/sys-minix/init.c */
 extern struct minix_ipcvecs _minix_ipcvecs;
 
-#define CHOOSETRAP(name) (_minix_ipcvecs. name ## _ptr)
+static inline int _send(endpoint_t dest, message *m_ptr)
+{
+	return _minix_ipcvecs.send(dest, m_ptr);
+}
 
-#define send		CHOOSETRAP(send)
-#define receive		CHOOSETRAP(receive)
-#define sendrec		CHOOSETRAP(sendrec)
-#define sendnb		CHOOSETRAP(sendnb)
-#define notify		CHOOSETRAP(notify)
-#define do_kernel_call	CHOOSETRAP(do_kernel_call)
-#define senda		CHOOSETRAP(senda)
+static inline int _receive(endpoint_t src, message *m_ptr, int *st)
+{
+	return _minix_ipcvecs.receive(src, m_ptr, st);
+}
+
+static inline int _sendrec(endpoint_t src_dest, message *m_ptr)
+{
+	return _minix_ipcvecs.sendrec(src_dest, m_ptr);
+}
+
+static inline int _sendnb(endpoint_t dest, message *m_ptr)
+{
+	return _minix_ipcvecs.send(dest, m_ptr);
+}
+
+static inline int _notify(endpoint_t dest)
+{
+	return _minix_ipcvecs.notify(dest);
+}
+
+static inline int do_kernel_call(message *m_ptr)
+{
+	return _minix_ipcvecs.do_kernel_call(m_ptr);
+}
+
+static inline int _senda(asynmsg_t *table, size_t count)
+{
+	return _minix_ipcvecs.senda(table, count);
+}
 
 #endif /* _IPC_H */

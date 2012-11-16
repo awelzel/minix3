@@ -23,7 +23,9 @@ then
 		fi
 	fi
 
-	tar -xf gmp-5.0.2.tar.bz2
-	mv gmp-5.0.2 dist
+	tar -oxjf gmp-5.0.2.tar.bz2
+	mv gmp-5.0.2 dist && \
+	cd dist && \
+	cat ../patches/* |patch -p1
 fi
 

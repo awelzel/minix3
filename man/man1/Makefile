@@ -1,7 +1,7 @@
 MAN=	ash.1 at.1 banner.1 basename.1 \
 	bsfilt.1 cal.1 cawf.1 chgrp.1 \
 	chmod.1 cksum.1 clear.1 cmp.1 comm.1 compress.1 \
-	cp.1 crc.1 crontab.1 ctags.1 dd.1 dev2name.1 \
+	cp.1 crc.1 crontab.1 ctags.1 dd.1 \
 	df.1 dhrystone.1 dosdir.1 dosread.1 doswrite.1 \
 	dumpcore.1 echo.1 eject.1 elvis.1 elvrec.1 \
 	env.1 expand.1 expr.1 factor.1 \
@@ -10,7 +10,7 @@ MAN=	ash.1 at.1 banner.1 basename.1 \
 	install.1 isodir.1 isoinfo.1 isoread.1 join.1 kill.1 \
 	last.1 loadfont.1 loadkeys.1 logger.1 \
 	look.1 lp.1 ls.1 lspci.1 mail.1  \
-	mesg.1 mixer.1 mkfs.1 \
+	mesg.1 mixer.1 mkfs.mfs.1 \
 	mkproto.1 mount.1 mt.1 nice.1 nm.1 nohup.1 od.1 \
 	paste.1 ping.1 playwave.1 pr.1 prep.1 \
 	profile.1 ps.1 pwd.1 rcp.1 recwave.1 \

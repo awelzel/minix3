@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <stdio.h>
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -27,6 +28,7 @@
 #if defined(__minix)
 #include <minix/partition.h>
 #include <minix/u64.h>
+#include <minix/minlib.h>
 #include <sys/ioctl.h>
 #endif
 #include <dirent.h>
@@ -39,12 +41,6 @@
 #define max(a,b) ((a) > (b) ? (a) : (b))
 #endif
 
-#ifndef DOS
-#ifndef UNIX
-#define UNIX
-#endif
-#endif
-
 #define INODE_MAP            2
 #define MAX_TOKENS          10
 #define LINE_LEN           200
@@ -54,11 +50,6 @@
 #define INODE_MAX       ((unsigned) 65535)
 #define SECTOR_SIZE	   512
 
-
-#ifdef DOS
-maybedefine O_RDONLY 4		/* O_RDONLY | BINARY_BIT */
- maybedefine BWRITE 5		/* O_WRONLY | BINARY_BIT */
-#endif
 
 #if !defined(__minix)
 #define mul64u(a,b)	((a) * (b))
@@ -76,7 +67,7 @@ typedef uint32_t zone_t;
 extern char *optarg;
 extern int optind;
 
-int next_zone, next_inode, zone_size, zone_shift = 0, zoff;
+int next_zone, next_inode, zoff;
 block_t nrblocks;
 int inode_offset, lct = 0, disk, fd, print = 0, file = 0;
 unsigned int nrinodes;
@@ -90,8 +81,8 @@ char *umap_array;	/* bit map tells if block read yet */
 int umap_array_elements = 0;
 block_t zone_map;		/* where is zone map? (depends on # inodes) */
 int inodes_per_block;
-int fs_version;
 size_t block_size;
+int extra_space_percent;
 
 FILE *proto;
 
@@ -126,13 +117,11 @@ void special(char *string);
 void get_block(block_t n, char *buf);
 void get_super_block(char *buf);
 void put_block(block_t n, char *buf);
-void cache_init(void);
-void flush(void);
 void mx_read(int blocknr, char *buf);
 void mx_write(int blocknr, char *buf);
 void dexit(char *s, int sectnum, int err);
 void usage(void);
-char *alloc_block(void);
+void *alloc_block(void);
 
 ino_t inocount;
 zone_t zonecount;
@@ -175,18 +164,11 @@ char *argv[];
   progname = argv[0];
   blocks = 0;
   i = 0;
-  fs_version = 3;
   inodes_per_block = 0;
   block_size = 0;
-  while ((ch = getopt(argc, argv, "12b:di:lotB:")) != EOF)
+  extra_space_percent = 0;
+  while ((ch = getopt(argc, argv, "b:di:lotB:x:")) != EOF)
 	switch (ch) {
-	    case '1':
-		fs_version = 1;
-		inodes_per_block = V1_INODES_PER_BLOCK;
-		break;
-	    case '2':
-	    	fs_version = 2;
-	    	break;
 	    case 'b':
 		blocks = strtoul(optarg, (char **) NULL, 0);
 		break;
@@ -201,12 +183,18 @@ char *argv[];
 	    case 'o':	override = 1;	break;
 	    case 't':	donttest = 1;	break;
 	    case 'B':	block_size = atoi(optarg);	break;
+	    case 'x':	extra_space_percent = atoi(optarg); break;
 	    default:	usage();
 	}
 
   if (argc == optind) usage();
 
-  if(fs_version == 3) {
+  /* Percentage of extra size must be nonnegative.
+   * It can legitimately be bigger than 100 but has to make some sort of sense.
+   */
+  if(extra_space_percent < 0 || extra_space_percent > 2000) usage();
+
+  {
   	if(!block_size) block_size = _MAX_BLOCK_SIZE; /* V3 default block size */
   	if(block_size%SECTOR_SIZE || block_size < _MIN_BLOCK_SIZE) {
   		fprintf(stderr, "block size must be multiple of sector (%d) "
@@ -219,15 +207,7 @@ char *argv[];
   			V2_INODE_SIZE);
   		pexit("specified block size illegal");
   	}
-  } else {
-  	if(block_size) {
-	  	pexit("Can't specify a block size if FS version is <3");
-  	}
- 	block_size = _STATIC_BLOCK_SIZE;	/* V1/V2 block size */
   }
-
-  zone_shift = 0;		/* for future use */
-  zone_size = 1 << zone_shift;	/* nr of blocks per zone */
 
   if(!inodes_per_block)
   	inodes_per_block = V2_INODES_PER_BLOCK(block_size);
@@ -283,10 +263,12 @@ char *argv[];
 	usrid = atoi(token[1]);
 	grpid = atoi(token[2]);
 
-	if(blocks == 0 && inodes == 0){
+	if(blocks <= 0 && inodes <= 0){
 		detect_fs_size();
 		blocks = blockcount;
 		inodes = inocount;
+		blocks += blocks*extra_space_percent/100;
+		inodes += inodes*extra_space_percent/100;
 		printf("dynamically sized filesystem: %d blocks, %d inodes\n", blocks, 
 			(unsigned int) inodes);
 	}		
@@ -309,12 +291,9 @@ char *argv[];
 		/* round up to fill inode block */
 		i += inodes_per_block - 1;
 		i = i / inodes_per_block * inodes_per_block;
-		if (i > INODE_MAX && fs_version < 3) i = INODE_MAX;
-
 	}
 	if (blocks < 5) pexit("Block count too small");
 	if (i < 1) pexit("Inode count too small");
-	if (i > INODE_MAX && fs_version < 3) pexit("Inode count too large");
 	inodes = (ino_t) i;
 
 	/* Make simple file system of the given size, using defaults. */
@@ -341,7 +320,6 @@ char *argv[];
   /* Open special. */
   special(argv[--optind]);
 
-#ifdef UNIX
   if (!donttest) {
 	short *testb;
 	ssize_t w;
@@ -382,15 +360,12 @@ printf("testb = 0x%x 0x%x 0x%x\n", testb[0], testb[1], testb[block_size-1]);
 	lseek(fd, 0L, SEEK_SET);
 	free(testb);
   }
-#endif
 
   /* Make the file-system */
 
-  cache_init();
-
 	put_block((block_t) 0, zero);	/* Write a null boot block. */
 
-  zones = nrblocks >> zone_shift;
+  zones = nrblocks;
 
   super(zones, inodes);
 
@@ -399,7 +374,6 @@ printf("testb = 0x%x 0x%x 0x%x\n", testb[0], testb[1], testb[block_size-1]);
   if (simple == 0) eat_dir(root_inum);
 
   if (print) print_fs();
-  flush();
   return(0);
 
   /* NOTREACHED */
@@ -423,9 +397,8 @@ void detect_fs_size()
   initb += bitmapsize((uint32_t) zonecount, block_size);
   initb += START_BLOCK;
   initb += (inocount + inodes_per_block - 1) / inodes_per_block;
-  initb = (initb + (1 << zone_shift) - 1) >> zone_shift;
 
-  blockcount = initb+zonecount*zone_size;
+  blockcount = initb+zonecount;
   fseek(proto, point, SEEK_SET);
 }
 
@@ -439,20 +412,17 @@ void sizeup_dir()
   zone_t dir_zones = 0;
   zone_t nr_dzones;
 
-  if (fs_version == 1) {
-	nr_dzones = V1_NR_DZONES;
-  } else {
-	nr_dzones = V2_NR_DZONES;
-  }
+  nr_dzones = V2_NR_DZONES;
 
   while (1) {
 	getline(line, token);
 	p = token[0];
 	if (*p == '$') {
-		dir_zones = (dir_entries / (NR_DIR_ENTRIES(block_size) * zone_size));		
-		if(dir_entries % (NR_DIR_ENTRIES(block_size) * zone_size))
+		dir_zones = (dir_entries / (NR_DIR_ENTRIES(block_size)));		
+		if(dir_entries % (NR_DIR_ENTRIES(block_size)))
 			dir_zones++;
-		/* Assumes directory fits in direct blocks */
+		if(dir_zones > nr_dzones)
+			dir_zones++;	/* Max single indir */
 		zonecount += dir_zones;
 		return;
 	}
@@ -465,6 +435,8 @@ void sizeup_dir()
 		sizeup_dir();
 	} else if (*p == 'b' || *p == 'c') {
 
+	} else if (*p == 's') {
+		zonecount++; /* Symlink contents is always stored a block */
 	} else {
 		if ((f = fopen(token[4], "r")) == NULL) {
 			fprintf(stderr, "%s: Can't open %s: %s\n",
@@ -478,8 +450,8 @@ void sizeup_dir()
 			}
 			size = ftell(f);
 			fclose(f);
-			zone_t fzones= (size / (zone_size * block_size));
-			if (size % (zone_size * block_size))
+			zone_t fzones= (size / block_size);
+			if (size % block_size)
 				fzones++;
 			if (fzones > nr_dzones)
 				fzones++;	/* Assumes files fit within single indirect */
@@ -562,7 +534,7 @@ ino_t inodes;
   int inodeblks;
   int initblks;
   uint32_t nb;
-  zone_t v1sq, v2sq;
+  zone_t v2sq;
   zone_t zo;
   struct super_block *sup;
   char *buf, *cp;
@@ -576,13 +548,8 @@ ino_t inodes;
   sup->s_flags = MFSFLAG_CLEAN;
 
   sup->s_ninodes = inodes;
-  if (fs_version == 1) {
-	sup->s_nzones = zones;
-	if (sup->s_nzones != zones) pexit("too many zones");
-  } else {
-	sup->s_nzones = 0;	/* not used in V2 - 0 forces errors early */
-	sup->s_zones = zones;
-  }
+  sup->s_nzones = 0;	/* not used in V2 - 0 forces errors early */
+  sup->s_zones = zones;
   
 #define BIGGERBLOCKS "Please try a larger block size for an FS of this size.\n"
   sup->s_imap_blocks = nb = bitmapsize((uint32_t) (1 + inodes), block_size);
@@ -598,8 +565,7 @@ ino_t inodes;
   inode_offset = START_BLOCK + sup->s_imap_blocks + sup->s_zmap_blocks;
   inodeblks = (inodes + inodes_per_block - 1) / inodes_per_block;
   initblks = inode_offset + inodeblks;
-  sup->s_firstdatazone_old = nb =
-	(initblks + (1 << zone_shift) - 1) >> zone_shift;
+  sup->s_firstdatazone_old = nb = initblks;
   if(nb >= zones) pexit("bit maps too large");
   if(nb != sup->s_firstdatazone_old) {
 	/* The field is too small to store the value. Fortunately, the value
@@ -611,19 +577,11 @@ ino_t inodes;
   }
   sup->s_firstdatazone = nb;
   zoff = sup->s_firstdatazone - 1;
-  sup->s_log_zone_size = zone_shift;
-  if (fs_version == 1) {
-	sup->s_magic = SUPER_MAGIC;	/* identify super blocks */
-	v1sq = (zone_t) V1_INDIRECTS * V1_INDIRECTS;
-	zo = V1_NR_DZONES + (int) V1_INDIRECTS + v1sq;
-  	sup->s_max_size = zo * block_size;
-  } else {
+  sup->s_log_zone_size = 0;
+  {
 	v2sq = (zone_t) V2_INDIRECTS(block_size) * V2_INDIRECTS(block_size);
 	zo = V2_NR_DZONES + (zone_t) V2_INDIRECTS(block_size) + v2sq;
-  	if(fs_version == 2) {
-		sup->s_magic = SUPER_V2;/* identify super blocks */
-  		sup->s_max_size = zo * block_size;
-	} else {
+	{
 		sup->s_magic = SUPER_V3;
   		sup->s_block_size = block_size;
   		sup->s_disk_version = 0;
@@ -676,6 +634,21 @@ ino_t inode;
   incr_link(inode);
 }
 
+void enter_symlink(ino_t inode, char *link)
+{
+  zone_t z;
+  char *buf;
+
+  buf = alloc_block();
+  z = alloc_zone();
+  strcpy(buf, link);
+  put_block(z, buf);
+
+  add_zone(inode, z, (size_t) strlen(link), current_time);
+
+  free(buf);
+}
+
 
 /*================================================================
  *	    eat_dir  -  recursively install directory
@@ -699,7 +672,6 @@ ino_t parent;
 	mode = mode_con(p);
 	usrid = atoi(token[2]);
 	grpid = atoi(token[3]);
-	if (grpid & 0200) fprintf(stderr, "A.S.Tanenbaum\n");
 	n = alloc_inode(mode, usrid, grpid);
 
 	/* Enter name in directory and update directory's size. */
@@ -725,6 +697,8 @@ ino_t parent;
 		if (token[6]) size = atoi(token[6]);
 		size = block_size * size;
 		add_zone(n, (zone_t) (makedev(maj,min)), size, current_time);
+	} else if (*p == 's') {
+		enter_symlink(n, token[4]);
 	} else {
 		/* Regular file. Go read it. */
 		if ((f = open(token[4], O_RDONLY)) < 0) {
@@ -746,7 +720,7 @@ void eat_file(inode, f)
 ino_t inode;
 int f;
 {
-  int ct, i, j, k;
+  int ct, k;
   zone_t z;
   char *buf;
   uint32_t timeval;
@@ -754,21 +728,62 @@ int f;
   buf = alloc_block();
 
   do {
-	for (i = 0, j = 0; i < zone_size; i++, j += ct) {
-		for (k = 0; k < block_size; k++) buf[k] = 0;
-		if ((ct = read(f, buf, block_size)) > 0) {
-			if (i == 0) z = alloc_zone();
-			put_block((z << zone_shift) + i, buf);
-		}
+	for (k = 0; k < block_size; k++) buf[k] = 0;
+	if ((ct = read(f, buf, block_size)) > 0) {
+		z = alloc_zone();
+		put_block(z, buf);
 	}
 	timeval = (dflag ? current_time : file_time(f));
-	if (ct) add_zone(inode, z, (size_t) j, timeval);
+	if (ct) add_zone(inode, z, (size_t) ct, timeval);
   } while (ct == block_size);
   close(f);
   free(buf);
 }
 
+d2_inode *get_inoblock(ino_t i, block_t *blockno, d2_inode **ino)
+{
+	int off;
+	d2_inode *inoblock = alloc_block();
+	*blockno = ((i - 1) / inodes_per_block) + inode_offset;
+	off = (i - 1) % inodes_per_block;
+	get_block(*blockno, (char *) inoblock);
+	*ino = inoblock + off;
+	return inoblock;
+}
 
+int dir_try_enter(zone_t z, ino_t child, char *name)
+{
+	char *p1, *p2;
+	struct direct *dir_entry = alloc_block();
+	int r = 0;
+	int i;
+
+	get_block(z, (char *) dir_entry);
+
+	for (i = 0; i < NR_DIR_ENTRIES(block_size); i++)
+		if (!dir_entry[i].mfs_d_ino)
+			break;
+
+	if(i < NR_DIR_ENTRIES(block_size)) {
+		int j;
+
+		r = 1;
+		dir_entry[i].mfs_d_ino = child;
+		p1 = name;
+		p2 = dir_entry[i].mfs_d_name;
+		j = sizeof(dir_entry[i].mfs_d_name);
+		assert(j == 60);
+		while (j--) {
+			*p2++ = *p1;
+			if (*p1 != 0) p1++;
+		}
+	}
+
+	put_block(z, (char *) dir_entry);
+	free(dir_entry);
+
+	return r;
+}
 
 /*================================================================
  *	    directory & inode management assist group
@@ -779,69 +794,46 @@ char *name;
 {
   /* Enter child in parent directory */
   /* Works for dir > 1 block and zone > block */
-  unsigned int i, j, k, l, off;
+  unsigned int k;
   block_t b;
   zone_t z;
-  char *p1, *p2;
-  struct direct *dir_entry;
-  d1_inode ino1[V1_INODES_PER_BLOCK];
-  d2_inode *ino2;
-  int nr_dzones;
+  zone_t *indirblock = alloc_block();
+  d2_inode *ino;
+  d2_inode *inoblock = get_inoblock(parent, &b, &ino);
 
-  b = ((parent - 1) / inodes_per_block) + inode_offset;
-  off = (parent - 1) % inodes_per_block;
+  assert(!(block_size % sizeof(struct direct)));
 
-  if(!(dir_entry = malloc(NR_DIR_ENTRIES(block_size) * sizeof(*dir_entry))))
-  	pexit("couldn't allocate directory entry");
-
-  if(!(ino2 = malloc(V2_INODES_PER_BLOCK(block_size) * sizeof(*ino2))))
-  	pexit("couldn't allocate block of inodes entry");
-
-  if (fs_version == 1) {
-	get_block(b, (char *) ino1);
-	nr_dzones = V1_NR_DZONES;
-  } else {
-	get_block(b, (char *) ino2);
-	nr_dzones = V2_NR_DZONES;
-  }
-  for (k = 0; k < nr_dzones; k++) {
-	if (fs_version == 1) {
-		z = ino1[off].d1_zone[k];
-		if (z == 0) {
-			z = alloc_zone();
-			ino1[off].d1_zone[k] = z;
-		}
-	} else {
-		z = ino2[off].d2_zone[k];
-		if (z == 0) {
-			z = alloc_zone();
-			ino2[off].d2_zone[k] = z;
-		}
+  for (k = 0; k < V2_NR_DZONES; k++) {
+	z = ino->d2_zone[k];
+	if (z == 0) {
+		z = alloc_zone();
+		ino->d2_zone[k] = z;
 	}
-	for (l = 0; l < zone_size; l++) {
-		get_block((z << zone_shift) + l, (char *) dir_entry);
-		for (i = 0; i < NR_DIR_ENTRIES(block_size); i++) {
-			if (dir_entry[i].mfs_d_ino == 0) {
-				dir_entry[i].mfs_d_ino = child;
-				p1 = name;
-				p2 = dir_entry[i].mfs_d_name;
-				j = sizeof(dir_entry[i].mfs_d_name);
-				j = 60;
-				while (j--) {
-					*p2++ = *p1;
-					if (*p1 != 0) p1++;
-				}
-				put_block((z << zone_shift) + l, (char *) dir_entry);
-				if (fs_version == 1) {
-					put_block(b, (char *) ino1);
-				} else {
-					put_block(b, (char *) ino2);
-				}
-				free(dir_entry);
-				free(ino2);
-				return;
-			}
-		}
+
+	if(dir_try_enter(z, child, name)) {
+		put_block(b, (char *) inoblock);
+		free(inoblock);
+		free(indirblock);
+		return;
+	}
+  }
+
+  /* no space in directory using just direct blocks; try indirect */
+  if (ino->d2_zone[V2_NR_DZONES] == 0)
+  	ino->d2_zone[V2_NR_DZONES] = alloc_zone();
+
+  get_block(ino->d2_zone[V2_NR_DZONES], (char *) indirblock);
+
+  for(k = 0; k < V2_INDIRECTS(block_size); k++) {
+  	z = indirblock[k];
+	if(!z) z = indirblock[k] = alloc_zone();
+
+	if(dir_try_enter(z, child, name)) {
+		put_block(b, (char *) inoblock);
+		put_block(ino->d2_zone[V2_NR_DZONES], (char *) indirblock);
+		free(inoblock);
+		free(indirblock);
+		return;
 	}
   }
 
@@ -852,56 +844,6 @@ char *name;
 
 
 void add_zone(ino_t n, zone_t z, size_t bytes, uint32_t cur_time)
-{
-  if (fs_version == 1) {
-	add_z_1(n, z, bytes, cur_time);
-  } else {
-	add_z_2(n, z, bytes, cur_time);
-  }
-}
-
-void add_z_1(ino_t n, zone_t z, size_t bytes, uint32_t cur_time)
-{
-  /* Add zone z to inode n. The file has grown by 'bytes' bytes. */
-
-  int off, i;
-  block_t b;
-  zone_t indir;
-  uint16_t blk[V1_INDIRECTS];
-  d1_inode *p;
-  d1_inode inode[V1_INODES_PER_BLOCK];
-
-  b = ((n - 1) / V1_INODES_PER_BLOCK) + inode_offset;
-  off = (n - 1) % V1_INODES_PER_BLOCK;
-  get_block(b, (char *) inode);
-  p = &inode[off];
-  p->d1_size += bytes;
-  p->d1_mtime = cur_time;
-  for (i = 0; i < V1_NR_DZONES; i++)
-	if (p->d1_zone[i] == 0) {
-		p->d1_zone[i] = (uint16_t) z;
-		put_block(b, (char *) inode);
-		return;
-	}
-  put_block(b, (char *) inode);
-
-  /* File has grown beyond a small file. */
-  if (p->d1_zone[V1_NR_DZONES] == 0)
-	p->d1_zone[V1_NR_DZONES] = (uint16_t) alloc_zone();
-  indir = p->d1_zone[V1_NR_DZONES];
-  put_block(b, (char *) inode);
-  b = indir << zone_shift;
-  get_block(b, (char *) blk);
-  for (i = 0; i < V1_INDIRECTS; i++)
-	if (blk[i] == 0) {
-		blk[i] = (uint16_t) z;
-		put_block(b, (char *) blk);
-		return;
-	}
-  pexit("File has grown beyond single indirect");
-}
-
-void add_z_2(ino_t n, zone_t z, size_t bytes, uint32_t cur_time)
 {
   /* Add zone z to inode n. The file has grown by 'bytes' bytes. */
 
@@ -938,7 +880,7 @@ void add_z_2(ino_t n, zone_t z, size_t bytes, uint32_t cur_time)
   if (p->d2_zone[V2_NR_DZONES] == 0) p->d2_zone[V2_NR_DZONES] = alloc_zone();
   indir = p->d2_zone[V2_NR_DZONES];
   put_block(b, (char *) inode);
-  b = indir << zone_shift;
+  b = indir;
   get_block(b, (char *) blk);
   for (i = 0; i < V2_INDIRECTS(block_size); i++)
 	if (blk[i] == 0) {
@@ -964,13 +906,7 @@ ino_t n;
 
   b = ((n - 1) / inodes_per_block) + inode_offset;
   off = (n - 1) % inodes_per_block;
-  if (fs_version == 1) {
-	d1_inode inode1[V1_INODES_PER_BLOCK];
-
-	get_block(b, (char *) inode1);
-	inode1[off].d1_nlinks++;
-	put_block(b, (char *) inode1);
-  } else {
+  {
 	static d2_inode *inode2 = NULL;
 	int n;
 
@@ -996,13 +932,7 @@ size_t count;
 
   b = ((n - 1) / inodes_per_block) + inode_offset;
   off = (n - 1) % inodes_per_block;
-  if (fs_version == 1) {
-	d1_inode inode1[V1_INODES_PER_BLOCK];
-
-	get_block(b, (char *) inode1);
-	inode1[off].d1_size += count;
-	put_block(b, (char *) inode1);
-  } else {
+  {
 	d2_inode *inode2;
 	if(!(inode2 = malloc(V2_INODES_PER_BLOCK(block_size) * sizeof(*inode2))))
 		pexit("couldn't allocate a block of inodes");
@@ -1032,15 +962,7 @@ int mode, usrid, grpid;
   }
   b = ((num - 1) / inodes_per_block) + inode_offset;
   off = (num - 1) % inodes_per_block;
-  if (fs_version == 1) {
-	d1_inode inode1[V1_INODES_PER_BLOCK];
-
-	get_block(b, (char *) inode1);
-	inode1[off].d1_mode = mode;
-	inode1[off].d1_uid = usrid;
-	inode1[off].d1_gid = grpid;
-	put_block(b, (char *) inode1);
-  } else {
+  {
 	d2_inode *inode2;
 
 	if(!(inode2 = malloc(V2_INODES_PER_BLOCK(block_size) * sizeof(*inode2))))
@@ -1067,15 +989,13 @@ static zone_t alloc_zone()
   /* Allocate a new zone */
   /* Works for zone > block */
   block_t b;
-  int i;
   zone_t z;
 
   z = next_zone++;
-  b = z << zone_shift;
-  if ((b + zone_size) > nrblocks)
+  b = z;
+  if ((b + 1) > nrblocks)
 	pexit("File system not big enough for all the files");
-  for (i = 0; i < zone_size; i++)
-	put_block(b + i, zero);	/* give an empty zone */
+  put_block(b, zero);	/* give an empty zone */
   /* DEBUG FIXME.  This assumes the bit is in the first zone map block. */
   insert_bit(zone_map, (int) (z - zoff));	/* lint, NOT OK because
 						 * z hasn't been broken
@@ -1138,6 +1058,7 @@ char *p;
   if (c1 == 'd') mode |= S_IFDIR;
   if (c1 == 'b') mode |= S_IFBLK;
   if (c1 == 'c') mode |= S_IFCHR;
+  if (c1 == 's') mode |= S_IFLNK;
   if (c1 == '-') mode |= S_IFREG;
   if (c2 == 'u') mode |= S_ISUID;
   if (c3 == 'g') mode |= S_ISGID;
@@ -1339,13 +1260,9 @@ error:
 uint32_t file_time(f)
 int f;
 {
-#ifdef UNIX
   struct stat statbuf;
   fstat(f, &statbuf);
   return(statbuf.st_mtime);
-#else				/* fstat not supported by DOS */
-  return(0L);
-#endif
 }
 
 
@@ -1355,7 +1272,6 @@ char *s;
   fprintf(stderr, "%s: %s\n", progname, s);
   if (lct != 0)
 	fprintf(stderr, "Line %d being processed when error detected.\n", lct);
-  flush();
   exit(2);
 }
 
@@ -1367,7 +1283,7 @@ size_t count;
   while (count--) *to++ = *from++;
 }
 
-char *alloc_block()
+void *alloc_block()
 {
 	char *buf;
 
@@ -1383,7 +1299,6 @@ void print_fs()
 {
   int i, j;
   ino_t k;
-  d1_inode inode1[V1_INODES_PER_BLOCK];
   d2_inode *inode2;
   unsigned short *usbuf;
   block_t b;
@@ -1413,32 +1328,12 @@ void print_fs()
 
   k = 0;
   for (b = inode_offset; k < nrinodes; b++) {
-	if (fs_version == 1) {
-		get_block(b, (char *) inode1);
-	} else {
-		get_block(b, (char *) inode2);
-	}
+	get_block(b, (char *) inode2);
 	for (i = 0; i < inodes_per_block; i++) {
 		k = inodes_per_block * (int) (b - inode_offset) + i + 1;
 		/* Lint but OK */
 		if (k > nrinodes) break;
-		if (fs_version == 1) {
-			if (inode1[i].d1_mode != 0) {
-				printf("Inode %2lu:  mode=", k);
-				printf("%06o", inode1[i].d1_mode);
-				printf("  uid=%2d  gid=%2d  size=",
-				inode1[i].d1_uid, inode1[i].d1_gid);
-				printf("%6d", inode1[i].d1_size);
-				printf("  zone[0]=%d\n", inode1[i].d1_zone[0]);
-			}
-			if ((inode1[i].d1_mode & S_IFMT) == S_IFDIR) {
-				/* This is a directory */
-				get_block(inode1[i].d1_zone[0], (char *) dir);
-				for (j = 0; j < NR_DIR_ENTRIES(block_size); j++)
-					if (dir[j].mfs_d_ino)
-						printf("\tInode %2u: %s\n", dir[j].mfs_d_ino, dir[j].mfs_d_name);
-			}
-		} else {
+		{
 			if (inode2[i].d2_mode != 0) {
 				printf("Inode %2lu:  mode=", k);
 				printf("%06o", inode2[i].d2_mode);
@@ -1487,261 +1382,11 @@ block_t n;
 void usage()
 {
   fprintf(stderr,
-	  "Usage: %s [-12dlot] [-b blocks] [-i inodes] [-B blocksize] special [proto]\n",
+	  "Usage: %s [-12dlot] [-b blocks] [-i inodes]\n"
+	  	"\t[-x extra] [-B blocksize] special [proto]\n",
 	  progname);
   exit(1);
 }
-
-/*================================================================
- *		      get_block & put_block for MS-DOS
- *===============================================================*/
-#ifdef DOS
-
-/*
- *	These are the get_block and put_block routines
- *	when compiling & running mkfs.c under MS-DOS.
- *
- *	It requires the (asembler) routines absread & abswrite
- *	from the file diskio.asm. Since these routines just do
- *	as they are told (read & write the sector specified),
- *	a local cache is used to minimize the i/o-overhead for
- *	frequently used blocks.
- *
- *	The global variable "file" determines whether the output
- *	is to a disk-device or to a binary file.
- */
-
-
-#define PH_SECTSIZE	   512	/* size of a physical disk-sector */
-
-
-char *derrtab[14] = {
-	     "no error",
-	     "disk is read-only",
-	     "unknown unit",
-	     "device not ready",
-	     "bad command",
-	     "data error",
-	     "internal error: bad request structure length",
-	     "seek error",
-	     "unknown media type",
-	     "sector not found",
-	     "printer out of paper (?)",
-	     "write fault",
-	     "read error",
-	     "general error"
-};
-
-#define	CACHE_SIZE	20	/* 20 block-buffers */
-
-
-struct cache {
-  char blockbuf[BLOCK_SIZE];
-  block_t blocknum;
-  int dirty;
-  int usecnt;
-} cache[CACHE_SIZE];
-
-
-void special(string)
-char *string;
-{
-
-  if (string[1] == ':' && string[2] == 0) {
-	/* Format: d: or d:fname */
-	disk = (string[0] & ~32) - 'A';
-	if (disk > 1 && !override)	/* safety precaution */
-		pexit("Bad drive specifier for special");
-  } else {
-	file = 1;
-	if ((fd = creat(string, BWRITE)) == 0)
-		pexit("Can't open special file");
-  }
-}
-
-void get_block(n, buf)
-block_t n;
-char *buf;
-{
-  /* Get a block to the user */
-  struct cache *bp, *fp;
-
-  /* First access returns a zero block */
-  if (read_and_set(n) == 0) {
-	copy(zero, buf, block_size);
-	return;
-  }
-
-  /* Look for block in cache */
-  fp = 0;
-  for (bp = cache; bp < &cache[CACHE_SIZE]; bp++) {
-	if (bp->blocknum == n) {
-		copy(bp, buf, block_size);
-		bp->usecnt++;
-		return;
-	}
-
-	/* Remember clean block */
-	if (bp->dirty == 0)
-		if (fp) {
-			if (fp->usecnt > bp->usecnt) fp = bp;
-		} else
-			fp = bp;
-  }
-
-  /* Block not in cache, get it */
-  if (!fp) {
-	/* No clean buf, flush one */
-	for (bp = cache, fp = cache; bp < &cache[CACHE_SIZE]; bp++)
-		if (fp->usecnt > bp->usecnt) fp = bp;
-	mx_write(fp->blocknum, fp);
-  }
-  mx_read(n, fp);
-  fp->dirty = 0;
-  fp->usecnt = 0;
-  fp->blocknum = n;
-  copy(fp, buf, block_size);
-}
-
-void put_block(n, buf)
-block_t n;
-char *buf;
-{   
-  /* Accept block from user */
-  struct cache *fp, *bp;
-
-  (void) read_and_set(n);
-
-  /* Look for block in cache */
-  fp = 0;
-  for (bp = cache; bp < &cache[CACHE_SIZE]; bp++) {
-	if (bp->blocknum == n) {
-		copy(buf, bp, block_size);
-		bp->dirty = 1;
-		return;
-	}
-
-	/* Remember clean block */
-	if (bp->dirty == 0)
-		if (fp) {
-			if (fp->usecnt > bp->usecnt) fp = bp;
-		} else
-			fp = bp;
-  }
-
-  /* Block not in cache */
-  if (!fp) {
-	/* No clean buf, flush one */
-	for (bp = cache, fp = cache; bp < &cache[CACHE_SIZE]; bp++)
-		if (fp->usecnt > bp->usecnt) fp = bp;
-	mx_write(fp->blocknum, fp);
-  }
-  fp->dirty = 1;
-  fp->usecnt = 1;
-  fp->blocknum = n;
-  copy(buf, fp, block_size);
-}
-
-void cache_init()
-{
-  struct cache *bp;
-  for (bp = cache; bp < &cache[CACHE_SIZE]; bp++) bp->blocknum = -1;
-}
-
-void flush()
-{
-  /* Flush all dirty blocks to disk */
-  struct cache *bp;
-
-  for (bp = cache; bp < &cache[CACHE_SIZE]; bp++)
-	if (bp->dirty) {
-		mx_write(bp->blocknum, bp);
-		bp->dirty = 0;
-	}
-}
-
-/*==================================================================
- *			hard read & write etc.
- *=================================================================*/
-#define MAX_RETRIES	5
-
-
-void mx_read(blocknr, buf)
-int blocknr;
-char *buf;
-{
-
-  /* Read the requested MINIX-block in core */
-  char (*bp)[PH_SECTSIZE];
-  int sectnum, retries, err;
-
-  if (file) {
-	lseek(fd, (off_t) blocknr * block_size, 0);
-	if (read(fd, buf, block_size) != block_size)
-		pexit("mx_read: error reading file");
-  } else {
-	sectnum = blocknr * (block_size / PH_SECTSIZE);
-	for (bp = buf; bp < &buf[block_size]; bp++) {
-		retries = MAX_RETRIES;
-		do
-			err = absread(disk, sectnum, bp);
-		while (err && --retries);
-
-		if (retries) {
-			sectnum++;
-		} else {
-			dexit("mx_read", sectnum, err);
-		}
-	}
-  }
-}
-
-void mx_write(blocknr, buf)
-int blocknr;
-char *buf;
-{
-  /* Write the MINIX-block to disk */
-  char (*bp)[PH_SECTSIZE];
-  int retries, sectnum, err;
-
-  if (file) {
-	lseek(fd, blocknr * block_size, 0);
-	if (write(fd, buf, block_size) != block_size) {
-		pexit("mx_write: error writing file");
-	}
-  } else {
-	sectnum = blocknr * (block_size / PH_SECTSIZE);
-	for (bp = buf; bp < &buf[block_size]; bp++) {
-		retries = MAX_RETRIES;
-		do {
-			err = abswrite(disk, sectnum, bp);
-		} while (err && --retries);
-
-		if (retries) {
-			sectnum++;
-		} else {
-			dexit("mx_write", sectnum, err);
-		}
-	}
-  }
-}
-
-
-void dexit(s, sectnum, err)
-int sectnum, err;
-char *s;
-{
-  printf("Error: %s, sector: %d, code: %d, meaning: %s\n",
-         s, sectnum, err, derrtab[err]);
-  exit(2);
-}
-
-#endif
-
-/*================================================================
- *		      get_block & put_block for UNIX
- *===============================================================*/
-#ifdef UNIX
 
 void special(string)
 char *string;
@@ -1808,17 +1453,3 @@ char *buf;
   }
 }
 
-
-/* Dummy routines to keep source file clean from #ifdefs */
-
-void flush()
-{
-  return;
-}
-
-void cache_init()
-{
-  return;
-}
-
-#endif

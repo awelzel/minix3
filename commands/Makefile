@@ -6,7 +6,7 @@ SUBDIR=	add_route arp ash at backup banner basename btrace cal \
 	cawf cd cdprobe cpp \
 	chmod chown ci cleantmp clear cmp co \
 	comm compress cp crc cron crontab cut \
-	dd decomp16 DESCRIBE dev2name devmand devsize df dhcpd \
+	dd decomp16 DESCRIBE devmand devsize df dhcpd \
 	dhrystone diff dirname diskctl dumpcore \
 	eject elvis env expand factor fbdctl \
 	find finger fingerd fix fold format fortune fsck.mfs \
@@ -16,7 +16,7 @@ SUBDIR=	add_route arp ash at backup banner basename btrace cal \
 	less loadkeys loadramdisk logger look lp \
 	lpd ls lspci mail MAKEDEV \
 	mesg mined mkfifo \
-	mkproto mount mt netconf nice acknm nohup \
+	mount mt netconf nice acknm nohup \
 	nonamed od paste patch \
 	ping postinstall poweroff pr prep printf printroot \
 	profile progressbar pr_routes ps pwd pwdauth \

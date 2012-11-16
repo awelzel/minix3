@@ -27,7 +27,6 @@
 #include "util.h"
 #include "sanitycheck.h"
 #include "region.h"
-#include "memory.h"
 
 /*===========================================================================*
  *				do_fork					     *
@@ -71,7 +70,6 @@ int do_fork(message *msg)
 #endif
 
   if(pt_new(&vmc->vm_pt) != OK) {
-	printf("VM: fork: pt_new failed\n");
 	return ENOMEM;
   }
 

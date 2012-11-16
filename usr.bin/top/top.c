@@ -2,11 +2,6 @@
 /* Author: Ben Gras <beng@few.vu.nl>  17 march 2006 */
 /* Modified for ProcFS by Alen Stojanov and David van Moolenbroek */
 
-#define _MINIX 1
-#ifndef __NBSD_LIBC
-#define _POSIX_SOURCE 1
-#endif
-
 #include <stdio.h>
 #include <unistd.h>
 #include <pwd.h>
@@ -50,7 +45,7 @@ int order = ORDER_CPU;
 u32_t system_hz;
 
 /* name of cpu cycle types, in the order they appear in /psinfo. */
-char *cputimenames[] = { "user", "ipc", "kernelcall" };
+const char *cputimenames[] = { "user", "ipc", "kernelcall" };
 
 #define CPUTIMENAMES (sizeof(cputimenames)/sizeof(cputimenames[0]))
 
@@ -154,8 +149,8 @@ void parse_file(pid_t pid)
 	p->p_memory = 0L;
 
 	if (!(p->p_flags & IS_TASK)) {
-		int i;
-		if ((i=fscanf(fp, " %lu %*u %*u %*c %*d %*u %u %*u %d %*c %*d %*u",
+		int j;
+		if ((j=fscanf(fp, " %lu %*u %*u %*c %*d %*u %u %*u %d %*c %*d %*u",
 			&p->p_memory, &effuid, &p->p_nice)) != 3) {
 
 			fclose(fp);

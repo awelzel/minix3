@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.76 2011/12/25 06:09:08 tsutsui Exp $
+#	$NetBSD: Makefile,v 1.78 2012/08/10 16:05:27 joerg Exp $
 
 LIB=	sa
 NOPIC=	# defined
@@ -41,7 +41,10 @@ SRCS+=	exec.c
 .if ${MACHINE_ARCH} != "i386" && ${MACHINE_ARCH} != "x86_64"
 SRCS+=	memcmp.c memcpy.c memmove.c memset.c strchr.c
 .endif
-##SRCS+=	bcopy.c bzero.c	# Remove me eventually.
+
+.ifndef __MINIX
+SRCS+=	bcopy.c bzero.c	# Remove me eventually.
+.endif
 
 # io routines
 SRCS+=	closeall.c dev.c disklabel.c dkcksum.c ioctl.c nullfs.c stat.c fstat.c
@@ -55,11 +58,14 @@ SRCS+= ls.c
 .endif
 
 .if (${SA_USE_LOADFILE} == "yes")
-#SRCS+=	loadfile.c loadfile_ecoff.c loadfile_elf32.c lookup_elf32.c \
-#	loadfile_elf64.c lookup_elf64.c
-SRCS+=	loadfile.c loadfile_elf32.c loadfile_elf64.c
-.if (${MACHINE_CPU} != "mips") && !defined(__MINIX)
+.ifndef __MINIX
+SRCS+=	loadfile.c loadfile_ecoff.c loadfile_elf32.c lookup_elf32.c \
+	loadfile_elf64.c lookup_elf64.c
+.if (${MACHINE_CPU} != "mips")
 SRCS+=	loadfile_aout.c
+.endif
+.else
+SRCS+=	loadfile.c loadfile_elf32.c loadfile_elf64.c
 .endif
 .endif
 
@@ -74,10 +80,8 @@ SRCS+=	bootp.c rarp.c bootparam.c
 SRCS+=	nfs.c tftp.c
 .endif
 
-.ifndef __MINIX_w
 SRCS+=	ffsv1.c ffsv2.c
 SRCS+=	lfsv1.c lfsv2.c
-.endif
 SRCS+=	cd9660.c
 SRCS+=	ustarfs.c
 SRCS+=	dosfs.c
@@ -105,9 +109,7 @@ lib${LIB}.o:: ${OBJS}
 	@rm -f lib${LIB}.o
 	@${LD} -r -o lib${LIB}.o `lorder ${OBJS} | tsort`
 
-.if defined(HAVE_GCC) || defined(HAVE_PCC)
 CPPFLAGS+=	-Wno-pointer-sign
-.endif
 
 .if defined(HAVE_GCC) && ${HAVE_GCC} >= 45 && ${MACHINE_ARCH} == "vax"
 COPTS.bootp.c+=	-O0
