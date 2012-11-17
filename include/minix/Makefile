@@ -21,7 +21,7 @@ INCS+=	acpi.h audio_fw.h bitmap.h \
 	sound.h spin.h sys_config.h sysinfo.h \
 	syslib.h sysutil.h timers.h type.h \
 	tty.h u64.h usb.h usb_ch9.h vbox.h \
-	vboxfs.h vboxif.h vboxtype.h vm.h \
+	vboxfs.h vboxif.h vboxtype.h virtio.h vm.h \
 	vfsif.h vtreefs.h libminixfs.h netsock.h
 
 # Necessary as the build system does not support multiple inclusion 
