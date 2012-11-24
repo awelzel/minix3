@@ -11,6 +11,8 @@
 
 #include "virtio_blk.h"
 
+#define mystatus(tid)  (status_vir[(tid)] & 0xFF)
+
 #define dprintf(s) do {						\
 	printf("%s: ", name);					\
 	printf s;						\
@@ -74,7 +76,7 @@ static void virtio_intr(unsigned int UNUSED(irqs));
 static int virtio_device(dev_t minor, device_id_t *id);
 static int virtio_flush(void);
 static void virtio_terminate(void);
-static int virtio_status2error(u8_t status);
+static int status2error(u8_t status);
 static void virtio_device_intr(void);
 static void virtio_spurious_intr(void);
 
@@ -330,16 +332,15 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	blockdriver_mt_sleep();
 
 	/* All was good */
-	if ((status_vir[tid] & 0xFF) == VIRTIO_BLK_S_OK)
+	if (mystatus(tid) == VIRTIO_BLK_S_OK)
 		return size;
 
 	/* Error path */
 	dprintf(("ERROR status=%02x sector=%llu len=%lx cnt=%d op=%s t=%d",
-		 status_vir[tid] & 0xFF, sector, size,
-		 pcnt, write ? "write" : "read",
-		 tid));
+		 mystatus(tid), sector, size, pcnt,
+		 write ? "write" : "read", tid));
 
-	return virtio_status2error(status_vir[tid] & 0xFF);
+	return status2error(mystatus(tid));
 }
 
 static int
@@ -485,13 +486,13 @@ virtio_flush(void)
 	blockdriver_mt_sleep();
 
 	/* All was good */
-	if ((status_vir[tid] & 0xFF) == VIRTIO_BLK_S_OK)
+	if (mystatus(tid) == VIRTIO_BLK_S_OK)
 		return OK;
 
 	/* Error path */
-	dprintf(("ERROR status=%02x op=flush t=%d", status_vir[tid] & 0xFF, tid));
+	dprintf(("ERROR status=%02x op=flush t=%d", mystatus(tid), tid));
 
-	return virtio_status2error(status_vir[tid] & 0xFF);
+	return status2error(mystatus(tid));
 }
 
 static void
@@ -500,20 +501,24 @@ virtio_terminate(void)
 	/* Don't terminate if still opened */
 	if (open_count > 0)
 		return;
-	
+
 	blockdriver_mt_terminate();
 }
 
 static int
-virtio_status2error(u8_t status)
+status2error(u8_t status)
 {
 	/* Convert a status from the host to an error */
-	if (status == VIRTIO_BLK_S_IOERR)
-		return EIO;
-	else if (status == VIRTIO_BLK_S_UNSUPP)
-		return ENOTSUP;
-
-	panic("%s: unknown status from host: %02x", name, status);
+	switch (status) {
+		case VIRTIO_BLK_S_IOERR:
+			return EIO;
+		case VIRTIO_BLK_S_UNSUPP:
+			return ENOTSUP;
+		default:
+			panic("%s: unknown status: %02x", name, status);
+	}
+	/* Never reached */
+	return OK;
 }
 
 static int
@@ -526,7 +531,7 @@ virtio_blk_alloc_requests(void)
 
 	if (!hdrs_vir)
 		return ENOMEM;
-	
+
 	status_vir = alloc_contig(VIRTIO_BLK_NUM_THREADS * sizeof(status_vir[0]),
 				  AC_ALIGN4K, &status_phys);
 
@@ -645,7 +650,7 @@ sef_cb_init_fresh(int type, sef_init_info_t *UNUSED(info))
 	/* Error path */
 	if (r == ENXIO)
 		panic("%s: No device found", name);
-	
+
 	if (r == ENOMEM)
 		panic("%s: Not enough memory", name);
 
@@ -683,7 +688,6 @@ main(int argc, char **argv)
 	blockdriver_mt_task(&virtio_blk_dtab);
 
 	dprintf(("Terminating"));
-	
 	virtio_blk_free_requests();
 	virtio_reset_device(config);
 
