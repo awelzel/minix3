@@ -44,9 +44,9 @@ struct packet {
 };
 
 /* Allocated data chunks */
-static char *data;
+static char *data_vir;
 static phys_bytes data_phys;
-static struct virtio_net_hdr *hdrs;
+static struct virtio_net_hdr *hdrs_vir;
 static phys_bytes hdrs_phys;
 static struct packet *packets;
 static int in_rx;
@@ -167,24 +167,29 @@ virtio_net_config(void)
 static int
 virtio_net_alloc_bufs(void)
 {
-	data = alloc_contig(BUF_PACKETS * ETH_MAX_PACK_SIZE,
+	data_vir = alloc_contig(BUF_PACKETS * ETH_MAX_PACK_SIZE,
 				  0, &data_phys);
-	if (!data)
+	if (!data_vir)
 		return ENOMEM;
 	
-	hdrs = alloc_contig(BUF_PACKETS * sizeof(hdrs[0]),
+	hdrs_vir = alloc_contig(BUF_PACKETS * sizeof(hdrs_vir[0]),
 				 0, &hdrs_phys);
 	
-	if (!hdrs)
+	if (!hdrs_vir) {
+		free_contig(data_vir, BUF_PACKETS * ETH_MAX_PACK_SIZE);
 		return ENOMEM;
+	}
 	
 	packets = malloc(BUF_PACKETS * sizeof(packets[0]));
 	
-	if (!packets)
+	if (!packets) {
+		free_contig(data_vir, BUF_PACKETS * ETH_MAX_PACK_SIZE);
+		free_contig(hdrs_vir, BUF_PACKETS * sizeof(hdrs_vir[0]));
 		return ENOMEM;
+	}
 
-	memset(data, 0, BUF_PACKETS * ETH_MAX_PACK_SIZE);
-	memset(hdrs, 0, BUF_PACKETS * sizeof(hdrs[0]));
+	memset(data_vir, 0, BUF_PACKETS * ETH_MAX_PACK_SIZE);
+	memset(hdrs_vir, 0, BUF_PACKETS * sizeof(hdrs_vir[0]));
 	memset(packets, 0, BUF_PACKETS * sizeof(packets[0]));
 	
 	return OK;
@@ -199,9 +204,9 @@ virtio_net_init_queues(void)
 
 	for (i = 0; i < BUF_PACKETS; i++) {
 		packets[i].idx = i;
-		packets[i].vhdr = &hdrs[i];
-		packets[i].phdr = hdrs_phys + i * sizeof(hdrs[i]);
-		packets[i].vdata = data + i * ETH_MAX_PACK_SIZE;
+		packets[i].vhdr = &hdrs_vir[i];
+		packets[i].phdr = hdrs_phys + i * sizeof(hdrs_vir[i]);
+		packets[i].vdata = data_vir + i * ETH_MAX_PACK_SIZE;
 		packets[i].pdata = data_phys + i * ETH_MAX_PACK_SIZE;
 		STAILQ_INSERT_HEAD(&free_list, &packets[i], next);
 	}
@@ -618,8 +623,8 @@ sef_cb_signal_handler(int signo)
 
 	dput(("Terminating"));
 	
-	free_contig(data, BUF_PACKETS * sizeof(data[0]));
-	free_contig(hdrs, BUF_PACKETS * sizeof(hdrs[0]));
+	free_contig(data_vir, BUF_PACKETS * sizeof(data_vir[0]));
+	free_contig(hdrs_vir, BUF_PACKETS * sizeof(hdrs_vir[0]));
 	free(packets);
 
 	virtio_reset_device(dev);
