@@ -108,11 +108,22 @@ struct virtio_feature netf[] = {
 static int
 virtio_net_probe(int skip)
 {
-	dev = virtio_setup_device(0x00001, name, 2, netf,
+	/* virtio-net has at least 2 queues */
+	int queues = 2;
+	dev = virtio_setup_device(0x00001, name, netf,
 				     sizeof(netf) / sizeof(netf[0]),
 				     1 /* threads */, skip);
 	if (dev == NULL)
 		return ENXIO;
+
+	/* If the host supports the control queue, allocate it as well */
+	if (virtio_host_supports(dev, VIRTIO_NET_F_CTRL_VQ))
+		queues += 1;
+	
+	if (virtio_alloc_queues(dev, queues) != OK) {
+		virtio_free_device(dev);
+		return ENOMEM;
+	}
 
 	return OK;
 }
@@ -591,7 +602,11 @@ sef_cb_init_fresh(int type, sef_init_info_t *info)
 	virtio_net_init_queues();
 
 	netdriver_announce();
+
+	virtio_device_ready(dev);
+
 	virtio_irq_enable(dev);
+
 	return(OK);
 }
 
@@ -608,6 +623,8 @@ sef_cb_signal_handler(int signo)
 	free(packets);
 
 	virtio_reset_device(dev);
+	virtio_free_queues(dev);
+	virtio_free_device(dev);
 
 	exit(1);
 }

@@ -616,17 +616,30 @@ virtio_blk_config(struct virtio_config *cfg, struct virtio_blk_config *blk_cfg)
 static int
 virtio_blk_probe(int skip)
 {
-	config = virtio_setup_device(0x00002, name, 1, blkf,
+	int r;
+
+	config = virtio_setup_device(0x00002, name, blkf,
 				     sizeof(blkf) / sizeof(blkf[0]),
 				     VIRTIO_BLK_NUM_THREADS, skip);
 	if (config == NULL)
 		return ENXIO;
 
+	/* virtio-blk has one queue only */
+	if ((r = virtio_alloc_queues(config, 1)) != OK) {
+		virtio_free_device(config);
+		return r;
+	}
+
 	// TODO, we should free the virtio device and possibly reset it
-	if (virtio_blk_alloc_requests() != OK)
-		return ENOMEM;
+	if ((r = virtio_blk_alloc_requests() != OK)) {
+		virtio_free_queues(config);
+		virtio_free_device(config);
+		return r;
+	}
 
 	virtio_blk_config(config, &blk_config);
+
+	virtio_device_ready(config);
 
 	virtio_irq_enable(config);
 
@@ -690,6 +703,9 @@ main(int argc, char **argv)
 	dprintf(("Terminating"));
 	virtio_blk_free_requests();
 	virtio_reset_device(config);
+	virtio_free_queues(config);
+	virtio_free_device(config);
+	config = NULL;
 
 	return OK;
 }

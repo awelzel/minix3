@@ -32,33 +32,38 @@ struct virtio_feature {
 	u8_t guest_support;
 };
 
-/* Forward declaration virtio_queue */
-struct virtio_queue;
-
 /* Forward declaration virtio_config */
 /* FIXME: This should be renamed to virtio_device or so */
 struct virtio_config;
 
-
 /* Find a virtio device with subdevice id subdevid. Returns a pointer
  * to an opaque virtio_config instance.
  */
-struct virtio_config *virtio_setup_device(
-		u16_t subdevid,
-		const char *name,		/* only for debugging */
-		int queue_count,
+struct virtio_config *virtio_setup_device( u16_t subdevid, const char *name,
 		struct virtio_feature *features, int feature_count,
-		int threads,
-		int skip			/* pci devices to skip */
-);
+		int threads, int skip);
 
-/* Reset a virtio device */
+/* Attempt to allocate queue_cnt memory for queues */
+int virtio_alloc_queues(struct virtio_config *cfg, int num_queues);
+
+/* Register the IRQ policy and indicate to the host we are ready to go */
+void virtio_device_ready(struct virtio_config *cfg);
+
+/* Unregister the IRQ and reset the device */
 void virtio_reset_device(struct virtio_config *cfg);
 
+/* Free the memory used by all queues */
+void virtio_free_queues(struct virtio_config *cfg);
 
-/* Allocate memory for all queues and the ring */
-int virtio_alloc_queues(struct virtio_config *cfg);
+/* Free all memory allocated for the device (except the queue memory,
+ * which has to be freed before with virtio_free_queues()).
+ *
+ * Don't touch the device afterwards! This is like free(dev).
+ */
+void virtio_free_device(struct virtio_config *cfg);
 
+
+/* Feature helpers */
 int virtio_guest_supports(struct virtio_config *cfg, int bit);
 int virtio_host_supports(struct virtio_config *cfg, int bit);
 

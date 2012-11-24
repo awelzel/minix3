@@ -87,6 +87,7 @@ static int init_device(int devind, struct virtio_config *cfg);
 static int init_phys_queues(struct virtio_config *cfg);
 static int exchange_features(struct virtio_config *cfg);
 static int alloc_phys_queue(struct virtio_queue *q);
+static void free_phys_queue(struct virtio_queue *q);
 static void init_phys_queue(struct virtio_queue *q);
 static int init_indirect_desc_table(struct indirect_desc_table *desc);
 static int init_indirect_desc_tables(struct virtio_config *cfg);
@@ -96,7 +97,7 @@ static int wants_kick(struct virtio_queue *q);
 static void kick_queue(struct virtio_config *cfg, int qidx);
 
 struct virtio_config *
-virtio_setup_device(u16_t subdevid, const char *name, int num_queues,
+virtio_setup_device(u16_t subdevid, const char *name,
 		struct virtio_feature *features, int num_features,
 		int threads, int skip)
 {
@@ -105,10 +106,8 @@ virtio_setup_device(u16_t subdevid, const char *name, int num_queues,
 	struct virtio_config *ret;
 
 	/* bogus values? */
-	if (skip < 0 || name == NULL || num_queues <= 0
-			|| num_features < 0 || threads <= 0) {
+	if (skip < 0 || name == NULL || num_features < 0 || threads <= 0)
 		return NULL;
-	}
 
 	pci_init();
 
@@ -138,73 +137,40 @@ virtio_setup_device(u16_t subdevid, const char *name, int num_queues,
 	if (ret == NULL)
 		return NULL;
 
+	/* Prepare virtio_config intance */
 	memset(ret, 0, sizeof(*ret));
 	ret->name = name;
-	ret->num_queues = num_queues;
 	ret->features = features;
 	ret->num_features = num_features;
 	ret->threads = threads;
-
-	/* allocate queue memory */
-	ret->queues = malloc(num_queues * sizeof(ret->queues[0]));
-
-	if (ret->queues == NULL) {
-		printf("%s: Could not allocate queues\n", ret->name);
-		goto free_dev;
-	}
-
-	memset(ret->queues, 0, num_queues * sizeof(ret->queues[0]));
-
 	/* see comment in the beginning of this file */
 	ret->num_indirect = threads;
 
-	ret->indirect = malloc(threads * sizeof(ret->indirect[0]));
-
-	if (ret->indirect == NULL) {
-		printf("%s: Could not allocate indirect tables\n", ret->name);
-		goto free_queues;
-	}
-
-	memset(ret->indirect, 0, threads * sizeof(ret->indirect[0]));
-
 	if (init_device(devind, ret) != OK) {
 		printf("%s: Could not initialize device\n", ret->name);
-		goto free_indirect;
+		goto err;
 	}
+
+	/* Ack the device */
+	virtio_write8(ret, VIRTIO_DEV_STATUS_OFF, VIRTIO_STATUS_ACK);
 
 	if (exchange_features(ret) != OK) {
 		printf("%s: Could not exchange features\n", ret->name);
-		goto free_indirect;
+		goto err;
 	}
 
 	if (init_indirect_desc_tables(ret) != OK) {
 		printf("%s: Could not initialize indirect tables\n", ret->name);
-		goto free_indirect;
-	}
-
-	if (init_phys_queues(ret) != OK) {
-		printf("%s: Could not initialize queues\n", ret->name);
-		goto free_indirect;
+		goto err;
 	}
 
 	/* We know how to drive the device... */
 	virtio_write8(ret, VIRTIO_DEV_STATUS_OFF, VIRTIO_STATUS_DRV);
 
-
-	/* Register IRQ line */
-	virtio_irq_register(ret);
-
-	/* Driver is ready to go! */
-	virtio_write8(ret, VIRTIO_DEV_STATUS_OFF, VIRTIO_STATUS_DRV_OK);
-
 	return ret;
 
 /* Error path */
-free_indirect:
-	free(ret->indirect);
-free_queues:
-	free(ret->queues);
-free_dev:
+err:
 	free(ret);
 	return NULL;
 }
@@ -224,12 +190,12 @@ init_device(int devind, struct virtio_config *cfg)
 	}
 
 	if (!iof) {
-		printf("%s: No IO space?", cfg->name);
+		printf("%s: PCI not IO space?", cfg->name);
 		return EINVAL;
 	}
 
 	if (base & 0xFFFF0000) {
-		printf("%s: Port weird (%08x)", cfg->name, base);
+		printf("%s: IO port weird (%08x)", cfg->name, base);
 		return EINVAL;
 	}
 
@@ -241,10 +207,6 @@ init_device(int devind, struct virtio_config *cfg)
 
 	/* Read IRQ line */
 	cfg->irq = pci_attr_r8(devind, PCI_ILR);
-	printf("%s: IRQ: %d\n", cfg->name, cfg->irq);
-
-	/* Ack the device */
-	virtio_write8(cfg, VIRTIO_DEV_STATUS_OFF, VIRTIO_STATUS_ACK);
 
 	return OK;
 }
@@ -273,10 +235,39 @@ exchange_features(struct virtio_config *cfg)
 	return OK;
 }
 
+int
+virtio_alloc_queues(struct virtio_config *cfg, int num_queues)
+{
+	int r = OK;
+
+	assert(cfg != NULL);
+
+	/* Assume there's no device with more than 256 queues */
+	if (num_queues < 0 || num_queues > 256)
+		return EINVAL;
+
+	cfg->num_queues = num_queues;
+	/* allocate queue memory */
+	cfg->queues = malloc(num_queues * sizeof(cfg->queues[0]));
+
+	if (cfg->queues == NULL)
+		return ENOMEM;
+
+	memset(cfg->queues, 0, num_queues * sizeof(cfg->queues[0]));
+
+	if ((r = init_phys_queues(cfg) != OK)) {
+		printf("%s: Could not initialize queues (%d)\n", cfg->name, r);
+		free(cfg->queues);
+		cfg->queues = NULL;
+	}
+
+	return r;
+}
+
 static int
 init_phys_queues(struct virtio_config *cfg)
 {
-	/* Initialize all queus */
+	/* Initialize all queues */
 	int i, j, r;
 	struct virtio_queue *q;
 
@@ -290,43 +281,34 @@ init_phys_queues(struct virtio_config *cfg)
 			printf("%s: Queue %d num=%d not ^2", cfg->name, i,
 							     q->num);
 			r = EINVAL;
-			goto free_queues;
+			goto free_phys_queues;
 		}
 
 		if ((r = alloc_phys_queue(q)) != OK)
-			goto free_queues;
+			goto free_phys_queues;
 
 		init_phys_queue(q);
 
-		printf("%s: queue[%02d] num=%d v=%p p=%08lX page=%04X\n",
-				cfg->name, i, q->num, q->vaddr, q->paddr,
-								q->page);
-		/* select queue */
-		virtio_write16(cfg, VIRTIO_QSEL_OFF, i);
-		/* let the host know about the guest page */
+		/* Let the host know about the guest physical page */
 		virtio_write32(cfg, VIRTIO_QADDR_OFF, q->page);
 	}
 
 	return OK;
 
-/* In case something goes wrong, we want to cleanup queues < i */
-free_queues:
-	for (j = 0; j < i; j++) {
-		q = &cfg->queues[i];
-		free_contig(q->vaddr, q->ring_size);
-		q->vaddr = NULL;
-		q->paddr = 0;
-		q->num = 0;
-		free_contig(q->data, sizeof(q->data[0]));
-		q->data = NULL;
-	}
+/* Error path */
+free_phys_queues:
+	for (j = 0; j < i; j++)
+		free_phys_queue(&cfg->queues[i]);
+
 	return r;
 }
 
 static int
 alloc_phys_queue(struct virtio_queue *q)
 {
-	/* So we need memory, a lot */
+	assert(q != NULL);
+
+	/* How much memory do we need? */
 	q->ring_size = vring_size(q->num, PAGE_SIZE);
 
 	q->vaddr = alloc_contig(q->ring_size, AC_ALIGN4K, &q->paddr);
@@ -344,6 +326,47 @@ alloc_phys_queue(struct virtio_queue *q)
 	}
 
 	return OK;
+}
+
+void
+virtio_device_ready(struct virtio_config *cfg)
+{
+	assert(cfg != NULL);
+
+	/* Register IRQ line */
+	virtio_irq_register(cfg);
+
+	/* Driver is ready to go! */
+	virtio_write8(cfg, VIRTIO_DEV_STATUS_OFF, VIRTIO_STATUS_DRV_OK);
+}
+
+void
+virtio_free_queues(struct virtio_config *cfg)
+{
+	int i;
+	assert(cfg != NULL);
+	assert(cfg->queues != NULL);
+	assert(cfg->num_queues > 0);
+
+	for (i = 0; i < cfg->num_queues; i++)
+		free_phys_queue(&cfg->queues[i]);
+
+	cfg->num_queues = 0;
+	cfg->queues = NULL;
+}
+
+static void
+free_phys_queue(struct virtio_queue *q)
+{
+	assert(q != NULL);
+	assert(q->vaddr != NULL);
+
+	free_contig(q->vaddr, q->ring_size);
+	q->vaddr = NULL;
+	q->paddr = 0;
+	q->num = 0;
+	free_contig(q->data, sizeof(q->data[0]));
+	q->data = NULL;
 }
 
 static void
@@ -372,6 +395,30 @@ init_phys_queue(struct virtio_queue *q)
 	return;
 }
 
+void
+virtio_free_device(struct virtio_config *cfg)
+{
+	int i;
+	struct indirect_desc_table *desc;
+
+	assert(cfg != NULL);
+
+	assert(cfg->num_indirect > 0);
+
+	for (i = 0; i < cfg->num_indirect; i++) {
+		desc = &cfg->indirect[i];
+		free_contig(desc->descs, desc->len);
+	}
+
+	cfg->num_indirect = 0;
+
+	assert(cfg->indirect != NULL);
+	free(cfg->indirect);
+	cfg->indirect = NULL;
+
+	free(cfg);
+}
+
 static int
 init_indirect_desc_table(struct indirect_desc_table *desc)
 {
@@ -392,6 +439,16 @@ init_indirect_desc_tables(struct virtio_config *cfg)
 {
 	int i, j, r;
 	struct indirect_desc_table *desc;
+
+	cfg->indirect = malloc(cfg->num_indirect * sizeof(cfg->indirect[0]));
+
+	if (cfg->indirect == NULL) {
+		printf("%s: Could not allocate indirect tables\n", cfg->name);
+		return ENOMEM;
+	}
+
+	memset(cfg->indirect, 0, cfg->num_indirect* sizeof(cfg->indirect[0]));
+
 	for (i = 0; i < cfg->num_indirect; i++) {
 		desc = &cfg->indirect[i];
 		if ((r = init_indirect_desc_table(desc)) != OK) {
@@ -401,6 +458,8 @@ init_indirect_desc_tables(struct virtio_config *cfg)
 				desc = &cfg->indirect[j];
 				free_contig(desc->descs, desc->len);
 			}
+
+			free(cfg->indirect);
 
 			return r;
 		}
