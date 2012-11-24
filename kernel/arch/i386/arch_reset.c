@@ -80,6 +80,19 @@ reset(void)
 	}
 }
 
+void
+poweroff(void)
+{
+	const char *shutdown_str;
+	
+	/* Bochs/QEMU poweroff */
+	shutdown_str = "Shutdown";
+        while (*shutdown_str) outb(0x8900, *(shutdown_str++));
+	
+	/* fallback option: reset */
+	reset();
+}
+
 __dead void arch_shutdown(int how)
 {
 	unsigned char unused_ch;
@@ -105,17 +118,19 @@ __dead void arch_shutdown(int how)
 		reset();
 	}
 
-	if (how == RBT_DEFAULT) {
-		how = RBT_RESET;
-	}
-
 	switch (how) {
 		case RBT_HALT:
 			/* Stop */
 			for (; ; ) halt_cpu();
 			NOT_REACHABLE;
+			
+		case RBT_POWEROFF:
+			/* Power off if possible, reset otherwise */
+			poweroff();
+			NOT_REACHABLE;
 
-		default:	
+		default:
+		case RBT_DEFAULT:	
 		case RBT_REBOOT:
 		case RBT_RESET:
 			/* Reset the system by forcing a processor shutdown. 
