@@ -50,20 +50,16 @@ struct device part[DEV_PER_DRIVE];
 struct device subpart[VIRTIO_BLK_SUB_PER_DRIVE];
 
 /* Headers for requests */
-static struct virtio_blk_outhdr hdrs[VIRTIO_BLK_NUM_THREADS];
+static struct virtio_blk_outhdr *hdrs_vir;
+static phys_bytes hdrs_phys;
 
-/* 
- * Status bytes for requests.
+/* Status bytes for requests.
  *
- * Usually a status is only one byte in length, but we
- * need to align them on a word boundary, so lets just
- * take two bytes.
+ * Usually a status is only one byte in length, but we need the lowest bit
+ * to propagate writable, so lets just take two bytes.
  */
-static u16_t status[VIRTIO_BLK_NUM_THREADS];
-
-/* Physical addresses of headers and status */
-static struct vumap_phys umap_hdrs[VIRTIO_BLK_NUM_THREADS];
-static struct vumap_phys umap_status[VIRTIO_BLK_NUM_THREADS];
+static u16_t *status_vir;
+static phys_bytes status_phys;
 
 /* Prototypes */
 static int virtio_open(dev_t minor, int access);
@@ -121,14 +117,18 @@ virtio_open(dev_t minor, int access)
 static int
 virtio_close(dev_t minor)
 {
-	if (open_count == 0)
+	if (open_count == 0) {
+		dprintf(("closing fully closed port?"));
 		return EINVAL;
+	}
 
 	open_count--;
 
-	/* If fully closed, flush the device */
-	if (open_count == 0)
+	/* If fully closed, flush the device, set workes to 1 */
+	if (open_count == 0) {
 		virtio_flush();
+		blockdriver_mt_set_workers(0, 1);
+	}
 
 	if (open_count == 0 && terminating)
 		virtio_terminate();
@@ -205,10 +205,10 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	/* Need to translate vir to phys */
 	struct vumap_vir vir[NR_IOREQS];
 
-	/* Physical including header and trailer */
+	/* Physical addresses including header and trailer */
 	struct vumap_phys phys[NR_IOREQS + 2];
 
-	/* Which thread is doing this? */
+	/* Which thread is doing the transfer? */
 	thread_id_t tid = blockdriver_mt_get_tid();
 
 	/* header and trailer */
@@ -242,7 +242,7 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	end_part = dv->dv_base + dv->dv_size;
 
 	/* Hmmm, AHCI tries to fix this up, but lets just say everything
-	 * needs to be sector (512 byte ) aligned...
+	 * needs to be sector (512 byte) aligned...
 	 */
 	if (position % VIRTIO_BLK_BLOCK_SIZE) {
 		dprintf(("Non sector-aligned access %016llx", position));
@@ -298,24 +298,26 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	}
 
 	/* Prepare the header */
-	if (write)
-		hdrs[tid].type = VIRTIO_BLK_T_OUT;
-	else
-		hdrs[tid].type = VIRTIO_BLK_T_IN;
+	memset(&hdrs_vir[tid], 0, sizeof(hdrs_vir[0]));
 
-	hdrs[tid].ioprio = 0;
-	hdrs[tid].sector = sector;
+	if (write)
+		hdrs_vir[tid].type = VIRTIO_BLK_T_OUT;
+	else
+		hdrs_vir[tid].type = VIRTIO_BLK_T_IN;
+
+	hdrs_vir[tid].ioprio = 0;
+	hdrs_vir[tid].sector = sector;
 
 	/* First the header */
-	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
-	phys[0].vp_size = sizeof(hdrs[0]);
+	phys[0].vp_addr = hdrs_phys + tid * sizeof(hdrs_vir[0]);
+	phys[0].vp_size = sizeof(hdrs_vir[0]);
 
 	/* Put the physical buffers into phys */
 	if ((r = prepare_bufs(vir, &phys[1], pcnt, write)) != OK)
 		return r;
 
 	/* Put the status at the end */
-	phys[pcnt + 1].vp_addr = umap_status[tid].vp_addr;
+	phys[pcnt + 1].vp_addr = status_phys + tid * sizeof(status_vir[0]);
 	phys[pcnt + 1].vp_size = sizeof(u8_t);
 
 	/* Status always needs write access */
@@ -328,16 +330,16 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	blockdriver_mt_sleep();
 
 	/* All was good */
-	if ((status[tid] & 0xFF) == VIRTIO_BLK_S_OK)
+	if ((status_vir[tid] & 0xFF) == VIRTIO_BLK_S_OK)
 		return size;
 
 	/* Error path */
 	dprintf(("ERROR status=%02x sector=%llu len=%lx cnt=%d op=%s t=%d",
-		 status[tid] & 0xFF, sector, size,
+		 status_vir[tid] & 0xFF, sector, size,
 		 pcnt, write ? "write" : "read",
 		 tid));
 
-	return virtio_status2error(status[tid] & 0xFF);
+	return virtio_status2error(status_vir[tid] & 0xFF);
 }
 
 static int
@@ -461,18 +463,18 @@ virtio_flush(void)
 		return EOPNOTSUPP;
 
 	/* Prepare the header */
-	memset(&hdrs[tid], 0, sizeof(hdrs[0]));
-	hdrs[tid].type = VIRTIO_BLK_T_FLUSH;
+	memset(&hdrs_vir[tid], 0, sizeof(hdrs_vir[0]));
+	hdrs_vir[tid].type = VIRTIO_BLK_T_FLUSH;
 
 	/* Let this be a barrier if the host supports it */
 	if (virtio_host_supports(config, VIRTIO_BLK_F_BARRIER))
-		hdrs[tid].type |= VIRTIO_BLK_T_BARRIER;
+		hdrs_vir[tid].type |= VIRTIO_BLK_T_BARRIER;
 
 	/* Header and status for the queue */
-	phys[0].vp_addr = umap_hdrs[tid].vp_addr;
-	phys[0].vp_size = sizeof(hdrs[0]);
-	phys[1].vp_addr = umap_status[tid].vp_addr;
-	phys[1].vp_size = sizeof(u8_t);
+	phys[0].vp_addr = hdrs_phys + tid * sizeof(hdrs_vir[0]);
+	phys[0].vp_size = sizeof(hdrs_vir[0]);
+	phys[1].vp_addr = status_phys + tid * sizeof(status_vir[0]);
+	phys[1].vp_size = 1;
 
 	/* Status always needs write access */
 	phys[1].vp_addr |= 1;
@@ -483,13 +485,13 @@ virtio_flush(void)
 	blockdriver_mt_sleep();
 
 	/* All was good */
-	if ((status[tid] & 0xFF) == VIRTIO_BLK_S_OK)
+	if ((status_vir[tid] & 0xFF) == VIRTIO_BLK_S_OK)
 		return OK;
 
 	/* Error path */
-	dprintf(("ERROR status=%02x op=flush t=%d", status[tid] & 0xFF, tid));
+	dprintf(("ERROR status=%02x op=flush t=%d", status_vir[tid] & 0xFF, tid));
 
-	return virtio_status2error(status[tid] & 0xFF);
+	return virtio_status2error(status_vir[tid] & 0xFF);
 }
 
 static void
@@ -498,9 +500,8 @@ virtio_terminate(void)
 	/* Don't terminate if still opened */
 	if (open_count > 0)
 		return;
-
-	virtio_reset_device(config);
-	exit(0);
+	
+	blockdriver_mt_terminate();
 }
 
 static int
@@ -515,41 +516,33 @@ virtio_status2error(u8_t status)
 	panic("%s: unknown status from host: %02x", name, status);
 }
 
-static void
-virtio_blk_phys_mapping(void)
+static int
+virtio_blk_alloc_requests(void)
 {
-	/* Map headers and status to physcal addresses */
-	struct vumap_vir virs[VIRTIO_BLK_NUM_THREADS];
+	/* Allocate memory for request headers and status field */
 
-	int r, cnt, pcnt;
-	pcnt = cnt = VIRTIO_BLK_NUM_THREADS;
-	int access = VUA_READ  | VUA_WRITE;
+	hdrs_vir = alloc_contig(VIRTIO_BLK_NUM_THREADS * sizeof(hdrs_vir[0]),
+				AC_ALIGN4K, &hdrs_phys);
 
-	/* Prepare array for hdr addresses */
-	for (int i = 0; i < VIRTIO_BLK_NUM_THREADS; i++) {
-		virs[i].vv_addr = (vir_bytes)&hdrs[i];
-		virs[i].vv_size = sizeof(hdrs[0]);
+	if (!hdrs_vir)
+		return ENOMEM;
+	
+	status_vir = alloc_contig(VIRTIO_BLK_NUM_THREADS * sizeof(status_vir[0]),
+				  AC_ALIGN4K, &status_phys);
+
+	if (!status_vir) {
+		free_contig(hdrs_vir, VIRTIO_BLK_NUM_THREADS * sizeof(hdrs_vir[0]));
+		return ENOMEM;
 	}
 
-	/* Do the mapping */
-	r = sys_vumap(SELF, virs, cnt, 0, access, umap_hdrs, &pcnt);
+	return OK;
+}
 
-	if (r != OK)
-		panic("%s: Unable to map hdrs %d", name, r);
-
-	/* Same for status addresses */
-	for (int i = 0; i < VIRTIO_BLK_NUM_THREADS; i++) {
-		assert(!((vir_bytes)(&status[i]) & 1));
-		virs[i].vv_addr = (vir_bytes)&status[i];
-		virs[i].vv_size = sizeof(status[0]);
-	}
-
-	pcnt = cnt = VIRTIO_BLK_NUM_THREADS;
-
-	r = sys_vumap(SELF, virs, cnt, 0, access, umap_status, &pcnt);
-
-	if (r != OK)
-		panic("%s: Unable to map status %d", name, r);
+static void
+virtio_blk_free_requests(void)
+{
+	free_contig(hdrs_vir, VIRTIO_BLK_NUM_THREADS * sizeof(hdrs_vir[0]));
+	free_contig(status_vir, VIRTIO_BLK_NUM_THREADS * sizeof(status_vir[0]));
 }
 
 static int
@@ -612,9 +605,6 @@ virtio_blk_config(struct virtio_config *cfg, struct virtio_blk_config *blk_cfg)
 
 	/* do feature setup */
 	virtio_blk_feature_setup();
-
-	virtio_blk_phys_mapping();
-
 	return 0;
 }
 
@@ -627,6 +617,10 @@ virtio_blk_probe(int skip)
 	if (config == NULL)
 		return ENXIO;
 
+	// TODO, we should free the virtio device and possibly reset it
+	if (virtio_blk_alloc_requests() != OK)
+		return ENOMEM;
+
 	virtio_blk_config(config, &blk_config);
 
 	virtio_irq_enable(config);
@@ -634,26 +628,34 @@ virtio_blk_probe(int skip)
 	return OK;
 }
 
-
 static int
 sef_cb_init_fresh(int type, sef_init_info_t *UNUSED(info))
 {
 	long instance = 0;
+	int r;
 
 	env_parse("instance", "d", 0, &instance, 0, 255);
 
-	if (virtio_blk_probe((int)instance) != OK)
+	if ((r = virtio_blk_probe((int)instance)) == OK) {
+		blockdriver_announce(type);
+		return OK;
+
+	}
+
+	/* Error path */
+	if (r == ENXIO)
 		panic("%s: No device found", name);
+	
+	if (r == ENOMEM)
+		panic("%s: Not enough memory", name);
 
-	blockdriver_announce(type);
-
-	return OK;
+	panic("%s: Unexpected failure (%d)", name, r);
 }
 
 static void
 sef_cb_signal_handler(int signo)
 {
-	/* Ignore all signal but SIGTERM */
+	/* Ignore all signals but SIGTERM */
 	if (signo != SIGTERM)
 		return;
 
@@ -680,8 +682,10 @@ main(int argc, char **argv)
 
 	blockdriver_mt_task(&virtio_blk_dtab);
 
-	virtio_terminate();
+	dprintf(("Terminating"));
+	
+	virtio_blk_free_requests();
+	virtio_reset_device(config);
 
-	/* Never reached */
 	return OK;
 }
