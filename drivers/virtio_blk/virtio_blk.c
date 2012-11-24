@@ -22,7 +22,7 @@
 /* virtio specific information */
 static const char *const name = "virtio-blk";
 static struct virtio_blk_config blk_config;
-static struct virtio_config *config;
+static struct virtio_device *blk_dev;
 
 struct virtio_feature blkf[] = {
 	{ "barrier",	VIRTIO_BLK_F_BARRIER,	0,	0 	},
@@ -100,7 +100,7 @@ static int
 virtio_open(dev_t minor, int access)
 {
 	/* Read only devices should only be mounted... read-only */
-	if ((access & W_BIT) && virtio_host_supports(config, VIRTIO_BLK_F_RO))
+	if ((access & W_BIT) && virtio_host_supports(blk_dev, VIRTIO_BLK_F_RO))
 		return EACCES;
 
 	/* Partition magic when opened the first time */
@@ -326,7 +326,7 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	phys[1 + pcnt].vp_addr |= 1;
 
 	/* Send addresses to queue */
-	virtio_to_queue(config, 0, phys, 2 + pcnt, &tid);
+	virtio_to_queue(blk_dev, 0, phys, 2 + pcnt, &tid);
 
 	/* Wait for completion */
 	blockdriver_mt_sleep();
@@ -396,7 +396,7 @@ virtio_geometry(dev_t minor, struct partition *entry)
 		return;
 
 	/* Only if the host supports it */
-	if(!virtio_host_supports(config, VIRTIO_BLK_F_GEOMETRY))
+	if(!virtio_host_supports(blk_dev, VIRTIO_BLK_F_GEOMETRY))
 		return;
 
 	entry->cylinders = blk_config.geometry.cylinders;
@@ -410,7 +410,7 @@ virtio_device_intr(void)
 	thread_id_t *tid;
 
 	/* Multiple requests might have finished */
-	while (!virtio_from_queue(config, 0, (void**)&tid))
+	while (!virtio_from_queue(blk_dev, 0, (void**)&tid))
 		blockdriver_mt_wakeup(*tid);
 }
 
@@ -429,12 +429,12 @@ static void
 virtio_intr(unsigned int UNUSED(irqs))
 {
 
-	if (virtio_had_irq(config))
+	if (virtio_had_irq(blk_dev))
 		virtio_device_intr();
 	else
 		virtio_spurious_intr();
 
-	virtio_irq_enable(config);
+	virtio_irq_enable(blk_dev);
 }
 
 static int
@@ -460,7 +460,7 @@ virtio_flush(void)
 	thread_id_t tid = blockdriver_mt_get_tid();
 
 	/* Host may not support flushing */
-	if (!virtio_host_supports(config, VIRTIO_BLK_F_FLUSH))
+	if (!virtio_host_supports(blk_dev, VIRTIO_BLK_F_FLUSH))
 		return EOPNOTSUPP;
 
 	/* Prepare the header */
@@ -468,7 +468,7 @@ virtio_flush(void)
 	hdrs_vir[tid].type = VIRTIO_BLK_T_FLUSH;
 
 	/* Let this be a barrier if the host supports it */
-	if (virtio_host_supports(config, VIRTIO_BLK_F_BARRIER))
+	if (virtio_host_supports(blk_dev, VIRTIO_BLK_F_BARRIER))
 		hdrs_vir[tid].type |= VIRTIO_BLK_T_BARRIER;
 
 	/* Header and status for the queue */
@@ -481,7 +481,7 @@ virtio_flush(void)
 	phys[1].vp_addr |= 1;
 
 	/* Send flush request to queue */
-	virtio_to_queue(config, 0, phys, phys_cnt, &tid);
+	virtio_to_queue(blk_dev, 0, phys, phys_cnt, &tid);
 
 	blockdriver_mt_sleep();
 
@@ -561,15 +561,15 @@ virtio_blk_feature_setup(void)
 	 * We use virtio_sread() here, to jump over the generic
 	 * headers using magic numbers...
 	 */
-	if (virtio_host_supports(config, VIRTIO_BLK_F_SEG_MAX)) {
-		blk_config.seg_max = virtio_sread32(config, 12);
+	if (virtio_host_supports(blk_dev, VIRTIO_BLK_F_SEG_MAX)) {
+		blk_config.seg_max = virtio_sread32(blk_dev, 12);
 		dprintf(("Seg Max: %d", blk_config.seg_max));
 	}
 
-	if (virtio_host_supports(config, VIRTIO_BLK_F_GEOMETRY)) {
-		blk_config.geometry.cylinders = virtio_sread16(config, 16);
-		blk_config.geometry.heads= virtio_sread8(config, 18);
-		blk_config.geometry.sectors = virtio_sread8(config, 19);
+	if (virtio_host_supports(blk_dev, VIRTIO_BLK_F_GEOMETRY)) {
+		blk_config.geometry.cylinders = virtio_sread16(blk_dev, 16);
+		blk_config.geometry.heads= virtio_sread8(blk_dev, 18);
+		blk_config.geometry.sectors = virtio_sread8(blk_dev, 19);
 
 		dprintf(("Geometry: cyl=%d heads=%d sectors=%d",
 					blk_config.geometry.cylinders,
@@ -577,35 +577,35 @@ virtio_blk_feature_setup(void)
 					blk_config.geometry.sectors));
 	}
 
-	if (virtio_host_supports(config, VIRTIO_BLK_F_SIZE_MAX))
+	if (virtio_host_supports(blk_dev, VIRTIO_BLK_F_SIZE_MAX))
 		dprintf(("Has size max"));
 
-	if (virtio_host_supports(config, VIRTIO_BLK_F_FLUSH))
+	if (virtio_host_supports(blk_dev, VIRTIO_BLK_F_FLUSH))
 		dprintf(("Supports flushing"));
 
-	if (virtio_host_supports(config, VIRTIO_BLK_F_BLK_SIZE)) {
-		blk_config.blk_size = virtio_sread32(config, 20);
+	if (virtio_host_supports(blk_dev, VIRTIO_BLK_F_BLK_SIZE)) {
+		blk_config.blk_size = virtio_sread32(blk_dev, 20);
 		dprintf(("Block Size: %d", blk_config.blk_size));
 	}
 
-	if (virtio_host_supports(config, VIRTIO_BLK_F_BARRIER))
+	if (virtio_host_supports(blk_dev, VIRTIO_BLK_F_BARRIER))
 		dprintf(("Supports barrier"));
 
 	return 0;
 }
 
 static int
-virtio_blk_config(struct virtio_config *cfg, struct virtio_blk_config *blk_cfg)
+virtio_blk_config(void)
 {
 	u32_t sectors_low, sectors_high, size_mbs;
 
 	/* capacity is always there */
-	sectors_low = virtio_sread32(cfg, 0);
-	sectors_high = virtio_sread32(cfg, 4);
-	blk_cfg->capacity = ((u64_t)sectors_high << 32) | sectors_low;
+	sectors_low = virtio_sread32(blk_dev, 0);
+	sectors_high = virtio_sread32(blk_dev, 4);
+	blk_config.capacity = ((u64_t)sectors_high << 32) | sectors_low;
 
 	/* If this gets truncated, you have a big disk... */
-	size_mbs = (u32_t)(blk_cfg->capacity * 512 / 1024 / 1024);
+	size_mbs = (u32_t)(blk_config.capacity * 512 / 1024 / 1024);
 	dprintf(("Capacity: %d MB", size_mbs));
 
 	/* do feature setup */
@@ -618,30 +618,30 @@ virtio_blk_probe(int skip)
 {
 	int r;
 
-	config = virtio_setup_device(0x00002, name, blkf,
+	blk_dev = virtio_setup_device(0x00002, name, blkf,
 				     sizeof(blkf) / sizeof(blkf[0]),
 				     VIRTIO_BLK_NUM_THREADS, skip);
-	if (config == NULL)
+	if (blk_dev == NULL)
 		return ENXIO;
 
 	/* virtio-blk has one queue only */
-	if ((r = virtio_alloc_queues(config, 1)) != OK) {
-		virtio_free_device(config);
+	if ((r = virtio_alloc_queues(blk_dev, 1)) != OK) {
+		virtio_free_device(blk_dev);
 		return r;
 	}
 
 	// TODO, we should free the virtio device and possibly reset it
 	if ((r = virtio_blk_alloc_requests() != OK)) {
-		virtio_free_queues(config);
-		virtio_free_device(config);
+		virtio_free_queues(blk_dev);
+		virtio_free_device(blk_dev);
 		return r;
 	}
 
-	virtio_blk_config(config, &blk_config);
+	virtio_blk_config();
 
-	virtio_device_ready(config);
+	virtio_device_ready(blk_dev);
 
-	virtio_irq_enable(config);
+	virtio_irq_enable(blk_dev);
 
 	return OK;
 }
@@ -702,10 +702,10 @@ main(int argc, char **argv)
 
 	dprintf(("Terminating"));
 	virtio_blk_free_requests();
-	virtio_reset_device(config);
-	virtio_free_queues(config);
-	virtio_free_device(config);
-	config = NULL;
+	virtio_reset_device(blk_dev);
+	virtio_free_queues(blk_dev);
+	virtio_free_device(blk_dev);
+	blk_dev= NULL;
 
 	return OK;
 }

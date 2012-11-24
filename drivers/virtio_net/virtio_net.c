@@ -20,7 +20,7 @@
 	printf s;						\
 } while (0)
 
-static struct virtio_config *dev;
+static struct virtio_device *net_dev;
 
 static const char *const name = "virtio-net";
 
@@ -110,18 +110,18 @@ virtio_net_probe(int skip)
 {
 	/* virtio-net has at least 2 queues */
 	int queues = 2;
-	dev = virtio_setup_device(0x00001, name, netf,
+	net_dev= virtio_setup_device(0x00001, name, netf,
 				     sizeof(netf) / sizeof(netf[0]),
 				     1 /* threads */, skip);
-	if (dev == NULL)
+	if (net_dev == NULL)
 		return ENXIO;
 
 	/* If the host supports the control queue, allocate it as well */
-	if (virtio_host_supports(dev, VIRTIO_NET_F_CTRL_VQ))
+	if (virtio_host_supports(net_dev, VIRTIO_NET_F_CTRL_VQ))
 		queues += 1;
 	
-	if (virtio_alloc_queues(dev, queues) != OK) {
-		virtio_free_device(dev);
+	if (virtio_alloc_queues(net_dev, queues) != OK) {
+		virtio_free_device(net_dev);
 		return ENOMEM;
 	}
 
@@ -135,10 +135,10 @@ virtio_net_config(void)
 	u32_t mac56;
 	int i;
 
-	if (virtio_host_supports(dev, VIRTIO_NET_F_MAC)) {
+	if (virtio_host_supports(net_dev, VIRTIO_NET_F_MAC)) {
 		dprintf(("Mac set by host: "));
-		mac14 = virtio_sread32(dev, 0);
-		mac56 = virtio_sread32(dev, 4);
+		mac14 = virtio_sread32(net_dev, 0);
+		mac56 = virtio_sread32(net_dev, 4);
 		*(u32_t*)virtio_net_mac = mac14;
 		*(u16_t*)(virtio_net_mac + 4) = mac56;
 
@@ -149,16 +149,16 @@ virtio_net_config(void)
 		dput(("No mac"));
 	}
 
-	if (virtio_host_supports(dev, VIRTIO_NET_F_STATUS)) {
-		dput(("Current Status %x", (u32_t)virtio_sread16(dev, 6)));
+	if (virtio_host_supports(net_dev, VIRTIO_NET_F_STATUS)) {
+		dput(("Current Status %x", (u32_t)virtio_sread16(net_dev, 6)));
 	} else {
 		dput(("No status"));
 	}
 	
-	if (virtio_host_supports(dev, VIRTIO_NET_F_CTRL_VQ))
+	if (virtio_host_supports(net_dev, VIRTIO_NET_F_CTRL_VQ))
 		dput(("Host supports control channel"));
 	
-	if (virtio_host_supports(dev, VIRTIO_NET_F_CTRL_RX))
+	if (virtio_host_supports(net_dev, VIRTIO_NET_F_CTRL_RX))
 		dput(("Host supports control channel for RX"));
 
 	return OK;
@@ -237,7 +237,7 @@ virtio_net_refill_rx_queue(void)
 		phys[0].vp_addr |= 1;
 		phys[1].vp_addr |= 1;
 
-		virtio_to_queue(dev, RX_Q, phys, 2, p);
+		virtio_to_queue(net_dev, RX_Q, phys, 2, p);
 		in_rx++;
 
 	}
@@ -254,7 +254,7 @@ virtio_net_check_queues(void)
 	struct packet *p;
 
 	/* Put the received packets into the recv list */
-	while (virtio_from_queue(dev, RX_Q, (void **)&p) == 0) {
+	while (virtio_from_queue(net_dev, RX_Q, (void **)&p) == 0) {
 		STAILQ_INSERT_TAIL(&recv_list, p, next);
 		in_rx--;
 		virtio_net_stats.ets_packetR++;
@@ -263,7 +263,7 @@ virtio_net_check_queues(void)
 	/* Packets from the TX queue just indicated they are free to
 	 * be reused now. inet already knows about them as being sent.
 	 */
-	while (virtio_from_queue(dev, TX_Q, (void **)&p) == 0) {
+	while (virtio_from_queue(net_dev, TX_Q, (void **)&p) == 0) {
 		memset(p->vhdr, 0, sizeof(*p->vhdr));
 		memset(p->vdata, 0, ETH_MAX_PACK_SIZE);
 		STAILQ_INSERT_HEAD(&free_list, p, next);
@@ -399,7 +399,7 @@ virtio_net_cpy_from_user(message *m)
 	phys[1].vp_addr = p->pdata;
 	assert(!(phys[1].vp_addr & 1));
 	phys[1].vp_size = bytes;
-	virtio_to_queue(dev, TX_Q, phys, 2, p);
+	virtio_to_queue(net_dev, TX_Q, phys, 2, p);
 	return bytes;
 }
 
@@ -407,7 +407,7 @@ static void
 virtio_net_intr(message *m)
 {
 	/* Check and clear interrupt flag */
-	if (virtio_had_irq(dev)) {
+	if (virtio_had_irq(net_dev)) {
 		virtio_net_check_queues();
 	} else {
 		if (!spurious_interrupt)
@@ -416,7 +416,7 @@ virtio_net_intr(message *m)
 		spurious_interrupt = 1;
 	}
 	
-	virtio_irq_enable(dev);
+	virtio_irq_enable(net_dev);
 		
 	virtio_net_check_pending();
 }
@@ -608,9 +608,9 @@ sef_cb_init_fresh(int type, sef_init_info_t *info)
 
 	netdriver_announce();
 
-	virtio_device_ready(dev);
+	virtio_device_ready(net_dev);
 
-	virtio_irq_enable(dev);
+	virtio_irq_enable(net_dev);
 
 	return(OK);
 }
@@ -627,9 +627,10 @@ sef_cb_signal_handler(int signo)
 	free_contig(hdrs_vir, BUF_PACKETS * sizeof(hdrs_vir[0]));
 	free(packets);
 
-	virtio_reset_device(dev);
-	virtio_free_queues(dev);
-	virtio_free_device(dev);
+	virtio_reset_device(net_dev);
+	virtio_free_queues(net_dev);
+	virtio_free_device(net_dev);
+	net_dev = NULL;
 
 	exit(1);
 }
