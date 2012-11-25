@@ -85,6 +85,7 @@ static int virtio_blk_device(dev_t minor, device_id_t *id);
 
 static int virtio_blk_flush(void);
 static void virtio_blk_terminate(void);
+static void virtio_blk_cleanup(void);
 static int virtio_blk_status2error(u8_t status);
 static int virtio_blk_alloc_requests(void);
 static void virtio_blk_free_requests(void);
@@ -111,6 +112,12 @@ static struct blockdriver virtio_blk_dtab  = {
 static int
 virtio_blk_open(dev_t minor, int access)
 {
+	struct device *dev = virtio_blk_part(minor);
+
+	/* Check if this device exists */
+	if (!dev)
+		return ENXIO;
+
 	/* Read only devices should only be mounted... read-only */
 	if ((access & W_BIT) && virtio_host_supports(blk_dev, VIRTIO_BLK_F_RO))
 		return EACCES;
@@ -133,8 +140,14 @@ virtio_blk_open(dev_t minor, int access)
 static int
 virtio_blk_close(dev_t minor)
 {
+	struct device *dev = virtio_blk_part(minor);
+
+	/* Check if this device exists */
+	if (!dev)
+		return ENXIO;
+
 	if (open_count == 0) {
-		dprintf(("closing fully closed port?"));
+		dprintf(("Closing one too many times?"));
 		return EINVAL;
 	}
 
@@ -457,7 +470,7 @@ virtio_blk_device(dev_t minor, device_id_t *id)
 	struct device *dev = virtio_blk_part(minor);
 
 	/* Check if this device exists */
-	if (dev == NULL)
+	if (!dev)
 		return ENXIO;
 
 	*id = 0;
@@ -517,6 +530,17 @@ virtio_blk_terminate(void)
 		return;
 
 	blockdriver_mt_terminate();
+}
+
+static void
+virtio_blk_cleanup(void)
+{
+	/* Just free the memory we allocated */
+	virtio_blk_free_requests();
+	virtio_reset_device(blk_dev);
+	virtio_free_queues(blk_dev);
+	virtio_free_device(blk_dev);
+	blk_dev = NULL;
 }
 
 static int
@@ -633,7 +657,7 @@ virtio_blk_probe(int skip)
 	blk_dev = virtio_setup_device(0x0002, name, blkf,
 				      sizeof(blkf) / sizeof(blkf[0]),
 				      VIRTIO_BLK_NUM_THREADS, skip);
-	if (blk_dev == NULL)
+	if (!blk_dev)
 		return ENXIO;
 
 	/* virtio-blk has one queue only */
@@ -712,11 +736,7 @@ main(int argc, char **argv)
 	blockdriver_mt_task(&virtio_blk_dtab);
 
 	dprintf(("Terminating"));
-	virtio_blk_free_requests();
-	virtio_reset_device(blk_dev);
-	virtio_free_queues(blk_dev);
-	virtio_free_device(blk_dev);
-	blk_dev= NULL;
+	virtio_blk_cleanup();
 
 	return OK;
 }
