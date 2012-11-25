@@ -19,10 +19,18 @@
 	printf("\n");						\
 } while (0)
 
-/* virtio specific information */
+/* Number of threads to use */
+#define VIRTIO_BLK_NUM_THREADS		4
+
+/* virtio-blk blocksize is always 512 bytes */
+#define VIRTIO_BLK_BLOCK_SIZE		512
+
 static const char *const name = "virtio-blk";
-static struct virtio_blk_config blk_config;
+
+/* static device handle */
 static struct virtio_device *blk_dev;
+
+static struct virtio_blk_config blk_config;
 
 struct virtio_feature blkf[] = {
 	{ "barrier",	VIRTIO_BLK_F_BARRIER,	0,	0 	},
@@ -37,9 +45,6 @@ struct virtio_feature blkf[] = {
 	{ "idbytes",	VIRTIO_BLK_ID_BYTES,	0,	0	}
 };
 
-/* Number of threads to use */
-#define VIRTIO_BLK_NUM_THREADS		4
-
 /* State information */
 static int spurious_interrupt = 0;
 static int terminating = 0;
@@ -47,7 +52,6 @@ static int open_count = 0;
 
 /* Partition magic */
 #define VIRTIO_BLK_SUB_PER_DRIVE	(NR_PARTITIONS * NR_PARTITIONS)
-#define VIRTIO_BLK_BLOCK_SIZE		512
 struct device part[DEV_PER_DRIVE];
 struct device subpart[VIRTIO_BLK_SUB_PER_DRIVE];
 
@@ -58,52 +62,62 @@ static phys_bytes hdrs_phys;
 /* Status bytes for requests.
  *
  * Usually a status is only one byte in length, but we need the lowest bit
- * to propagate writable, so lets just take two bytes.
+ * to propagate writable. For this reason we take u16_t and use a mask for
+ * the lower byte later.
  */
 static u16_t *status_vir;
 static phys_bytes status_phys;
 
 /* Prototypes */
-static int virtio_open(dev_t minor, int access);
-static int virtio_close(dev_t minor);
-static ssize_t virtio_transfer(dev_t minor, int do_write, u64_t position,
-	endpoint_t endpt, iovec_t *iovec, unsigned int count, int flags);
-static int virtio_ioctl(dev_t minor, unsigned int req, endpoint_t endpt,
-	cp_grant_id_t grant);
-static struct device *virtio_part(dev_t minor);
-static void virtio_geometry(dev_t minor, struct partition *entry);
-static void virtio_intr(unsigned int UNUSED(irqs));
-static int virtio_device(dev_t minor, device_id_t *id);
-static int virtio_flush(void);
-static void virtio_terminate(void);
-static int status2error(u8_t status);
-static void virtio_device_intr(void);
-static void virtio_spurious_intr(void);
+static int virtio_blk_open(dev_t minor, int access);
+static int virtio_blk_close(dev_t minor);
+static ssize_t virtio_blk_transfer(dev_t minor, int write, u64_t position,
+				   endpoint_t endpt, iovec_t *iovec,
+				   unsigned int cnt, int flags);
+static int virtio_blk_ioctl(dev_t minor, unsigned int req, endpoint_t endpt,
+			    cp_grant_id_t grant);
+static struct device * virtio_blk_part(dev_t minor);
+static void virtio_blk_geometry(dev_t minor, struct partition *entry);
+static void virtio_blk_device_intr(void);
+static void virtio_blk_spurious_intr(void);
+static void virtio_blk_intr(unsigned int irqs);
+static int virtio_blk_device(dev_t minor, device_id_t *id);
+
+static int virtio_blk_flush(void);
+static void virtio_blk_terminate(void);
+static int virtio_blk_status2error(u8_t status);
+static int virtio_blk_alloc_requests(void);
+static void virtio_blk_free_requests(void);
+static int virtio_blk_feature_setup(void);
+static int virtio_blk_config(void);
+static int virtio_blk_probe(int skip);
 
 /* libblockdriver driver tab */
 static struct blockdriver virtio_blk_dtab  = {
 	BLOCKDRIVER_TYPE_DISK,
-	virtio_open,
-	virtio_close,
-	virtio_transfer,
-	virtio_ioctl,
+	virtio_blk_open,
+	virtio_blk_close,
+	virtio_blk_transfer,
+	virtio_blk_ioctl,
 	NULL,		/* bdr_cleanup */
-	virtio_part,
-	virtio_geometry,
-	virtio_intr,
+	virtio_blk_part,
+	virtio_blk_geometry,
+	virtio_blk_intr,
 	NULL,		/* bdr_alarm */
 	NULL,		/* bdr_other */
-	virtio_device
+	virtio_blk_device
 };
 
 static int
-virtio_open(dev_t minor, int access)
+virtio_blk_open(dev_t minor, int access)
 {
 	/* Read only devices should only be mounted... read-only */
 	if ((access & W_BIT) && virtio_host_supports(blk_dev, VIRTIO_BLK_F_RO))
 		return EACCES;
 
-	/* Partition magic when opened the first time */
+	/* Partition magic when opened the first time or re-opened after
+	 * being fully closed
+	 */
 	if (open_count == 0) {
 		memset(part, 0, sizeof(part));
 		memset(subpart, 0, sizeof(subpart));
@@ -117,7 +131,7 @@ virtio_open(dev_t minor, int access)
 }
 
 static int
-virtio_close(dev_t minor)
+virtio_blk_close(dev_t minor)
 {
 	if (open_count == 0) {
 		dprintf(("closing fully closed port?"));
@@ -126,14 +140,15 @@ virtio_close(dev_t minor)
 
 	open_count--;
 
-	/* If fully closed, flush the device, set workes to 1 */
+	/* If fully closed, flush the device and set workes to 1 */
 	if (open_count == 0) {
-		virtio_flush();
+		virtio_blk_flush();
 		blockdriver_mt_set_workers(0, 1);
 	}
 
-	if (open_count == 0 && terminating)
-		virtio_terminate();
+	/* If supposed to terminate and fully closed, do it! */
+	if (terminating && open_count == 0)
+		virtio_blk_terminate();
 
 	return OK;
 }
@@ -145,13 +160,13 @@ prepare_bufs(struct vumap_vir *vir, struct vumap_phys *phys, int cnt, int w)
 
 		/* So you gave us a byte aligned buffer? Good job! */
 		if (phys[i].vp_addr & 1) {
-			dprintf(("odd buffer from %08lx", phys[i+1].vp_addr));
+			dprintf(("byte aligned %08lx", phys[i].vp_addr));
 			return EINVAL;
 		}
 
 		/* Check if the buffer is good */
 		if (phys[i].vp_size != vir[i].vv_size) {
-			dprintf(("Non-contig buf %08lx", phys[i+1].vp_addr));
+			dprintf(("Non-contig buf %08lx", phys[i].vp_addr));
 			return EINVAL;
 		}
 
@@ -201,19 +216,18 @@ prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir, iovec_s_t *iv,
 }
 
 static ssize_t
-virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
-	iovec_t *iovec, unsigned int cnt, int flags)
+virtio_blk_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
+		    iovec_t *iovec, unsigned int cnt, int flags)
 {
 	/* Need to translate vir to phys */
 	struct vumap_vir vir[NR_IOREQS];
 
-	/* Physical addresses including header and trailer */
+	/* Physical addresses of buffers, including header and trailer */
 	struct vumap_phys phys[NR_IOREQS + 2];
 
 	/* Which thread is doing the transfer? */
 	thread_id_t tid = blockdriver_mt_get_tid();
 
-	/* header and trailer */
 	vir_bytes size = 0;
 	vir_bytes size_tmp = 0;
 	struct device *dv;
@@ -234,11 +248,11 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	if (position >= blk_config.capacity * VIRTIO_BLK_BLOCK_SIZE)
 		return 0;
 
-	dv = virtio_part(minor);
+	dv = virtio_blk_part(minor);
 
+	/* Does device exist? */
 	if (!dv)
 		return ENXIO;
-
 
 	position += dv->dv_base;
 	end_part = dv->dv_base + dv->dv_size;
@@ -340,12 +354,12 @@ virtio_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 		 mystatus(tid), sector, size, pcnt,
 		 write ? "write" : "read", tid));
 
-	return status2error(mystatus(tid));
+	return virtio_blk_status2error(mystatus(tid));
 }
 
 static int
-virtio_ioctl(dev_t minor, unsigned int req, endpoint_t endpt,
-	cp_grant_id_t grant)
+virtio_blk_ioctl(dev_t minor, unsigned int req, endpoint_t endpt,
+		 cp_grant_id_t grant)
 {
 	switch (req) {
 
@@ -354,7 +368,7 @@ virtio_ioctl(dev_t minor, unsigned int req, endpoint_t endpt,
 			(vir_bytes) &open_count, sizeof(open_count));
 
 	case DIOCFLUSH:
-		return virtio_flush();
+		return virtio_blk_flush();
 
 	}
 
@@ -362,10 +376,10 @@ virtio_ioctl(dev_t minor, unsigned int req, endpoint_t endpt,
 }
 
 static struct device *
-virtio_part(dev_t minor)
+virtio_blk_part(dev_t minor)
 {
-	/* There's only a single drive attached to this,
-	 * lets take some shortcuts.
+	/* There's only a single drive attached to this device, alyways.
+	 * Lets take some shortcuts...
 	 */
 
 	/* Take care of d0 d0p0 ... */
@@ -389,7 +403,7 @@ virtio_part(dev_t minor)
 }
 
 static void
-virtio_geometry(dev_t minor, struct partition *entry)
+virtio_blk_geometry(dev_t minor, struct partition *entry)
 {
 	/* Only for the drive */
 	if (minor != 0)
@@ -405,7 +419,7 @@ virtio_geometry(dev_t minor, struct partition *entry)
 }
 
 static void
-virtio_device_intr(void)
+virtio_blk_device_intr(void)
 {
 	thread_id_t *tid;
 
@@ -415,7 +429,7 @@ virtio_device_intr(void)
 }
 
 static void
-virtio_spurious_intr(void)
+virtio_blk_spurious_intr(void)
 {
 	/* Output a single message about spurious interrupts */
 	if (spurious_interrupt)
@@ -426,21 +440,21 @@ virtio_spurious_intr(void)
 }
 
 static void
-virtio_intr(unsigned int UNUSED(irqs))
+virtio_blk_intr(unsigned int irqs)
 {
 
 	if (virtio_had_irq(blk_dev))
-		virtio_device_intr();
+		virtio_blk_device_intr();
 	else
-		virtio_spurious_intr();
+		virtio_blk_spurious_intr();
 
 	virtio_irq_enable(blk_dev);
 }
 
 static int
-virtio_device(dev_t minor, device_id_t *id)
+virtio_blk_device(dev_t minor, device_id_t *id)
 {
-	struct device *dev = virtio_part(minor);
+	struct device *dev = virtio_blk_part(minor);
 
 	/* Check if this device exists */
 	if (dev == NULL)
@@ -451,7 +465,7 @@ virtio_device(dev_t minor, device_id_t *id)
 }
 
 static int
-virtio_flush(void)
+virtio_blk_flush(void)
 {
 	struct vumap_phys phys[2];
 	size_t phys_cnt = sizeof(phys) / sizeof(phys[0]);
@@ -492,11 +506,11 @@ virtio_flush(void)
 	/* Error path */
 	dprintf(("ERROR status=%02x op=flush t=%d", mystatus(tid), tid));
 
-	return status2error(mystatus(tid));
+	return virtio_blk_status2error(mystatus(tid));
 }
 
 static void
-virtio_terminate(void)
+virtio_blk_terminate(void)
 {
 	/* Don't terminate if still opened */
 	if (open_count > 0)
@@ -506,7 +520,7 @@ virtio_terminate(void)
 }
 
 static int
-status2error(u8_t status)
+virtio_blk_status2error(u8_t status)
 {
 	/* Convert a status from the host to an error */
 	switch (status) {
@@ -553,13 +567,10 @@ virtio_blk_free_requests(void)
 static int
 virtio_blk_feature_setup(void)
 {
-	/* Feature setup for virtio_blk
+	/* Feature setup for virtio-blk
 	 *
-	 * FIXME: This only reads and prints stuff right now, not taking
-	 * any into account.
-	 *
-	 * We use virtio_sread() here, to jump over the generic
-	 * headers using magic numbers...
+	 * FIXME: Besides the geometry, everything is just debug output
+	 * FIXME2: magic numbers
 	 */
 	if (virtio_host_supports(blk_dev, VIRTIO_BLK_F_SEG_MAX)) {
 		blk_config.seg_max = virtio_sread32(blk_dev, 12);
@@ -568,7 +579,7 @@ virtio_blk_feature_setup(void)
 
 	if (virtio_host_supports(blk_dev, VIRTIO_BLK_F_GEOMETRY)) {
 		blk_config.geometry.cylinders = virtio_sread16(blk_dev, 16);
-		blk_config.geometry.heads= virtio_sread8(blk_dev, 18);
+		blk_config.geometry.heads = virtio_sread8(blk_dev, 18);
 		blk_config.geometry.sectors = virtio_sread8(blk_dev, 19);
 
 		dprintf(("Geometry: cyl=%d heads=%d sectors=%d",
@@ -618,9 +629,10 @@ virtio_blk_probe(int skip)
 {
 	int r;
 
-	blk_dev = virtio_setup_device(0x00002, name, blkf,
-				     sizeof(blkf) / sizeof(blkf[0]),
-				     VIRTIO_BLK_NUM_THREADS, skip);
+	/* sub device id for virtio-blk is 0x0002 */
+	blk_dev = virtio_setup_device(0x0002, name, blkf,
+				      sizeof(blkf) / sizeof(blkf[0]),
+				      VIRTIO_BLK_NUM_THREADS, skip);
 	if (blk_dev == NULL)
 		return ENXIO;
 
@@ -630,7 +642,7 @@ virtio_blk_probe(int skip)
 		return r;
 	}
 
-	// TODO, we should free the virtio device and possibly reset it
+	/* Allocate memory for headers and status */
 	if ((r = virtio_blk_alloc_requests() != OK)) {
 		virtio_free_queues(blk_dev);
 		virtio_free_device(blk_dev);
@@ -639,6 +651,7 @@ virtio_blk_probe(int skip)
 
 	virtio_blk_config();
 
+	/* Let the host now that we are ready */
 	virtio_device_ready(blk_dev);
 
 	virtio_irq_enable(blk_dev);
@@ -647,7 +660,7 @@ virtio_blk_probe(int skip)
 }
 
 static int
-sef_cb_init_fresh(int type, sef_init_info_t *UNUSED(info))
+sef_cb_init_fresh(int type, sef_init_info_t *info)
 {
 	long instance = 0;
 	int r;
@@ -657,7 +670,6 @@ sef_cb_init_fresh(int type, sef_init_info_t *UNUSED(info))
 	if ((r = virtio_blk_probe((int)instance)) == OK) {
 		blockdriver_announce(type);
 		return OK;
-
 	}
 
 	/* Error path */
@@ -678,7 +690,7 @@ sef_cb_signal_handler(int signo)
 		return;
 
 	terminating = 1;
-	virtio_terminate();
+	virtio_blk_terminate();
 }
 
 static void
@@ -686,7 +698,6 @@ sef_local_startup(void)
 {
 	sef_setcb_init_fresh(sef_cb_init_fresh);
 	sef_setcb_init_lu(sef_cb_init_fresh);
-
 	sef_setcb_signal_handler(sef_cb_signal_handler);
 
 	sef_startup();
