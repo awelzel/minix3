@@ -359,16 +359,55 @@ virtio_net_cpy_to_user(message *m)
 }
 
 static int
+sys_easy_vsafecopy_from(endpoint_t src_proc, iovec_s_t *iov, int count,
+			vir_bytes dst, size_t max, size_t *copied)
+{
+	int i, r;
+	size_t left = max;
+	vir_bytes cur_off = 0;
+	struct vscp_vec vv[NR_IOREQS];
+
+	for (i = 0; i < count && left > 0; i++) {
+		vv[i].v_from = src_proc;
+		vv[i].v_to = SELF;
+		vv[i].v_gid = iov[i].iov_grant;
+		vv[i].v_offset = 0;
+		vv[i].v_addr = dst + cur_off;
+		vv[i].v_bytes = iov[i].iov_size;
+
+		/* More data in iov than the buffer can hold, this should be
+		 * manageable by the caller.
+		 */
+		if (left - vv[i].v_bytes > left) {
+			printf("sys_easy_vsafecopy_from: buf too small!\n");
+			return ENOMEM;
+		}
+
+		left -= iov[i].iov_size;
+		cur_off += iov[i].iov_size;
+	}
+
+	/* Now that we prepared the vscp_vec, we can call vsafecopy() */
+	if ((r = sys_vsafecopy(vv, count)) != OK)
+		printf("sys_vsafecopy: failed: (%d)\n", 4);
+
+	if (copied)
+		*copied = cur_off;
+
+	return OK;
+}
+
+static int
 virtio_net_cpy_from_user(message *m)
 {
 	/* Put user bytes into a a free packet buffer and
 	 * then forward this packet to the TX queue.
 	 */
-	int i, r, size, ivsz, bytes = 0;
-	int left = ETH_MAX_PACK_SIZE;	/* Copy the whole packet */
+	int r;
 	iovec_s_t iovec[NR_IOREQS];
 	struct vumap_phys phys[2];
 	struct packet *p;
+	size_t bytes;
 	
 	/* This should only be called if free_list has some entries */
 	assert(!STAILQ_EMPTY(&free_list));
@@ -378,20 +417,13 @@ virtio_net_cpy_from_user(message *m)
 
 	virtio_net_fetch_iovec(iovec, m);
 
-	for (i = 0; i < m->DL_COUNT && left > 0; i++) {
-		ivsz = iovec[i].iov_size;
-		size = left > ivsz ? ivsz : left;
-		r = sys_safecopyfrom(m->m_source, iovec[i].iov_grant, 0,
-				    (vir_bytes) p->vdata + bytes, size);
+	r = sys_easy_vsafecopy_from(m->m_source, iovec, m->DL_COUNT,
+				    (vir_bytes)p->vdata, ETH_MAX_PACK_SIZE,
+				    &bytes);
 
-		if (r != OK)
-			panic("%s: copy from %d failed (%d)", name,
-							      m->m_source,
-							      r);
+	if (r != OK)
+		panic("%s: copy from %d failed", name, m->m_source);
 
-		left -= size;
-		bytes += size;
-	}
 
 	phys[0].vp_addr = p->phdr;
 	assert(!(phys[0].vp_addr & 1));
