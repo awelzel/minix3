@@ -264,7 +264,9 @@ struct fproc *rfp;
 	symlink.l_vmnt_lock = VMNT_READ;
 	sym_vp = advance(res_vp, &symlink, rfp);
 
-	if (sym_vp != NULL && S_ISLNK(sym_vp->v_mode)) {
+	if (sym_vp == NULL) break;
+
+	if (S_ISLNK(sym_vp->v_mode)) {
 		/* Last component is a symlink, but if we've been asked to not
 		 * resolve it, return now.
 		 */
@@ -309,6 +311,41 @@ struct fproc *rfp;
 			}
 
 			continue;
+		}
+	} else {
+		symloop = 0;	/* Not a symlink, so restart counting */
+
+		/* If we're crossing a mount point, return root node of mount
+		 * point on which the file resides. That's the 'real' last
+		 * dir that holds the file we're looking for.
+		 */
+		if (sym_vp->v_fs_e != res_vp->v_fs_e) {
+			assert(sym_vmp != NULL);
+
+			/* Unlock final file, it might have wrong lock types */
+			unlock_vnode(sym_vp);
+			unlock_vmnt(sym_vmp);
+			put_vnode(sym_vp);
+			sym_vp = NULL;
+
+			/* Also unlock and release erroneous result */
+			unlock_vnode(*resolve->l_vnode);
+			unlock_vmnt(*resolve->l_vmp);
+			put_vnode(res_vp);
+
+			/* Relock vmnt and vnode with correct lock types */
+			lock_vmnt(sym_vmp, resolve->l_vmnt_lock);
+			lock_vnode(sym_vmp->m_root_node, resolve->l_vnode_lock);
+			res_vp = sym_vmp->m_root_node;
+			dup_vnode(res_vp);
+			*resolve->l_vnode = res_vp;
+			*resolve->l_vmp = sym_vmp;
+
+			/* We've effectively resolved the final component, so
+			 * change it to current directory to prevent future
+			 * 'advances' of returning erroneous results.
+			 */
+			strlcpy(dir_entry, ".", NAME_MAX+1);
 		}
 	}
 	break;
@@ -583,7 +620,7 @@ char ename[NAME_MAX + 1];
 		cur = (struct dirent *) (buf + consumed);
 		name_len = cur->d_reclen - offsetof(struct dirent, d_name) - 1;
 
-		if(cur->d_name + name_len+1 >= &buf[DIR_ENTRIES*DIR_ENTRY_SIZE])
+		if(cur->d_name + name_len+1 > &buf[sizeof(buf)])
 			return(EINVAL);	/* Rubbish in dir entry */
 		if (entry->v_inode_nr == cur->d_ino) {
 			/* found the entry we were looking for */
@@ -619,7 +656,8 @@ struct fproc *rfp;
   char temp_path[PATH_MAX];
   struct lookup resolve;
 
-  dir_vp = NULL;
+  parent_dir = dir_vp = NULL;
+  parent_vmp = dir_vmp = NULL;
   strlcpy(temp_path, orig_path, PATH_MAX);
   temp_path[PATH_MAX - 1] = '\0';
 
@@ -640,6 +678,9 @@ struct fproc *rfp;
 	 * filename.
 	 */
 	strlcpy(orig_path, temp_path, NAME_MAX+1);	/* Store file name */
+
+	/* If we're just crossing a mount point, our name has changed to '.' */
+	if (!strcmp(orig_path, ".")) orig_path[0] = '\0';
 
 	/* check if the file is a symlink, if so resolve it */
 	r = rdlink_direct(orig_path, temp_path, rfp);
@@ -669,6 +710,10 @@ struct fproc *rfp;
 
 	/* check if we're at the root node of the file system */
 	if (dir_vp->v_vmnt->m_root_node == dir_vp) {
+		if (dir_vp->v_vmnt->m_mounted_on == NULL) {
+			/* Bail out, we can't go any higher */
+			break;
+		}
 		unlock_vnode(dir_vp);
 		unlock_vmnt(dir_vmp);
 		put_vnode(dir_vp);
@@ -732,17 +777,22 @@ struct fproc *rfp;
 	unlock_vmnt(dir_vmp);
 	put_vnode(dir_vp);
 	dir_vp = parent_dir;
+	dir_vmp = parent_vmp;
+	parent_vmp = NULL;
   }
 
+  unlock_vmnt(dir_vmp);
   unlock_vnode(dir_vp);
-  unlock_vmnt(parent_vmp);
-
   put_vnode(dir_vp);
 
   /* add the leading slash */
+  len = strlen(orig_path);
   if (strlen(orig_path) >= PATH_MAX) return(ENAMETOOLONG);
-  memmove(orig_path+1, orig_path, strlen(orig_path));
+  memmove(orig_path+1, orig_path, len);
   orig_path[0] = '/';
+
+  /* remove trailing slash if there is any */
+  if (len > 1 && orig_path[len] == '/') orig_path[len] = '\0';
 
   return(OK);
 }

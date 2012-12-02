@@ -151,8 +151,8 @@ int do_mount(void);
 int do_umount(void);
 int is_nonedev(dev_t dev);
 void mount_pfs(void);
-int mount_fs(dev_t dev, char fullpath[PATH_MAX+1], endpoint_t fs_e, int
-	rdonly, char mount_label[LABEL_MAX]);
+int mount_fs(dev_t dev, char mount_dev[PATH_MAX], char mount_path[PATH_MAX],
+	endpoint_t fs_e, int rdonly, char mount_label[LABEL_MAX]);
 int unmount(dev_t dev, char label[LABEL_MAX]);
 void unmount_all(int force);
 
@@ -315,6 +315,7 @@ void init_vmnts(void);
 int lock_vmnt(struct vmnt *vp, tll_access_t locktype);
 void unlock_vmnt(struct vmnt *vp);
 void vmnt_unmap_by_endpt(endpoint_t proc_e);
+void fetch_vmnt_paths(void);
 
 /* vnode.c */
 void check_vnode_locks(void);
