@@ -8,8 +8,8 @@ FILES=$(PROG).conf
 FILESNAME=$(PROG)
 FILESDIR= /etc/system.conf.d
 
-DPADD+=	${LIBNETDRIVER} ${LIBSYS} ${LIBTIMERS} ${LIBVIRTIO}
-LDADD+=	-lvirtio -lnetdriver -lsys -ltimers
+DPADD+=	${LIBNETDRIVER} ${LIBSYS} ${LIBVIRTIO}
+LDADD+=	-lnetdriver -lsys -lvirtio
 
 MAN=
 
