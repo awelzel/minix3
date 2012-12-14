@@ -192,23 +192,23 @@ prepare_bufs(struct vumap_vir *vir, struct vumap_phys *phys, int cnt, int w)
 
 static int
 prepare_vir_vec(endpoint_t endpt, struct vumap_vir *vir, iovec_s_t *iv,
-	int cnt, vir_bytes *size)
+		int cnt, vir_bytes *size)
 {
 	/* This is pretty much the same as sum_iovec from AHCI,
 	 * except that we don't support any iovecs where the size
 	 * is not a multiple of 512
 	 */
-	vir_bytes tmp, total = 0;
+	vir_bytes s, total = 0;
 	for (int i = 0; i < cnt; i++) {
-		tmp = iv[i].iov_size;
+		s = iv[i].iov_size;
 
-		if (tmp == 0 || (tmp % VIRTIO_BLK_BLOCK_SIZE) || tmp > LONG_MAX) {
-			dprintf(("bad iv[%d].iov_size (%lu) from %d", i, tmp,
-									 endpt));
+		if (s == 0 || (s % VIRTIO_BLK_BLOCK_SIZE) || s > LONG_MAX) {
+			dprintf(("bad iv[%d].iov_size (%lu) from %d", i, s,
+								      endpt));
 			return EINVAL;
 		}
 
-		total += tmp;
+		total += s;
 
 		if (total > LONG_MAX) {
 			dprintf(("total overflow from %d", endpt));
@@ -285,10 +285,7 @@ virtio_blk_transfer(dev_t minor, int write, u64_t position, endpoint_t endpt,
 	if (r != OK)
 		return r;
 
-	if (position == end_part)
-		return 0;
-
-	if (position > end_part)
+	if (position >= end_part)
 		return 0;
 
 	/* Truncate if the partition is smaller than that */
