@@ -712,6 +712,14 @@ sef_cb_signal_handler(int signo)
 
 	terminating = 1;
 	virtio_blk_terminate();
+
+	/* If we get a signal when completely closed, call
+	 * exit(). We only leave the blockdriver_mt_task()
+	 * loop after completing a request which is not the
+	 * case for signals.
+	 */
+	if (open_count == 0)
+		exit(0);
 }
 
 static void
