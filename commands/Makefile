@@ -12,7 +12,7 @@ SUBDIR=	add_route arp ash at backup banner basename btrace cal \
 	find finger fingerd fix fold format fortune fsck.mfs \
 	ftp101 gcore gcov-pull getty grep head hexdump host \
 	hostaddr id ifconfig ifdef \
-	intr ipcrm ipcs irdpd isoread join kill last \
+	intr ipcrm ipcs irdpd isoread kill last \
 	less loadkeys loadramdisk logger look lp \
 	lpd ls lspci mail MAKEDEV \
 	mesg mined mkfifo \
@@ -23,11 +23,11 @@ SUBDIR=	add_route arp ash at backup banner basename btrace cal \
 	ramdisk rarpd rawspeed rcp rdate readclock \
 	reboot remsync rev rget rlogin \
 	rotate rsh rshd service setup shar acksize \
-	sleep slip sort spell split sprofalyze sprofdiff srccrc \
+	sleep slip spell split sprofalyze sprofdiff srccrc \
 	stty svclog svrctl swifi sync synctree sysenv \
 	syslogd tail tcpd tcpdp tcpstat tee telnet \
 	telnetd term termcap tget time touch tr \
-	truncate tsort tty udpstat umount uname unexpand \
+	truncate tty udpstat umount uname unexpand \
 	unstack update uud uue version vol wc \
 	whereis which who write writeisofs fetch \
 	xargs yes zdump zmodem pkgin_cd \

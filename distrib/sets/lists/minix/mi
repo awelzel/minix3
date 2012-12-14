@@ -276,6 +276,7 @@
 ./usr/bin/logger			minix-sys
 ./usr/bin/login				minix-sys
 ./usr/bin/look				minix-sys
+./usr/bin/lorder			minix-sys
 ./usr/bin/lpd				minix-sys
 ./usr/bin/lp				minix-sys
 ./usr/bin/lspci				minix-sys
@@ -297,6 +298,7 @@
 ./usr/bin/mktemp			minix-sys
 ./usr/bin/more				minix-sys
 ./usr/bin/mt				minix-sys
+./usr/bin/nbperf			minix-sys
 ./usr/bin/newgrp			minix-sys
 ./usr/bin/nice				minix-sys
 ./usr/bin/nohup				minix-sys
@@ -663,7 +665,7 @@
 ./usr/include/minix/timers.h					minix-sys
 ./usr/include/minix/tty.h					minix-sys
 ./usr/include/minix/type.h					minix-sys
-./usr/include/minix/types.h					minix-sys
+./usr/include/minix/types.h					minix-sys	obsolete
 ./usr/include/minix/u64.h					minix-sys
 ./usr/include/minix/usb_ch9.h					minix-sys
 ./usr/include/minix/usb.h					minix-sys
@@ -1291,6 +1293,7 @@
 ./usr/man/man1/logger.1			minix-sys
 ./usr/man/man1/login.1			minix-sys
 ./usr/man/man1/look.1			minix-sys
+./usr/man/man1/lorder.1			minix-sys
 ./usr/man/man1/lp.1			minix-sys
 ./usr/man/man1/ls.1			minix-sys
 ./usr/man/man1/lspci.1			minix-sys
@@ -1314,6 +1317,7 @@
 ./usr/man/man1/mount.1			minix-sys
 ./usr/man/man1/mt.1			minix-sys
 ./usr/man/man1/mv.1			minix-sys
+./usr/man/man1/nbperf.1			minix-sys
 ./usr/man/man1/newgrp.1			minix-sys
 ./usr/man/man1/nice.1			minix-sys
 ./usr/man/man1/nm.1			minix-sys

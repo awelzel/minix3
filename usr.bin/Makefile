@@ -10,17 +10,18 @@ SUBDIR= \
 	 \
 	 du \
 	genassym \
-	indent \
+	indent join \
 	ldd \
-	login m4 \
+	login lorder m4 \
 	make man \
 	mkdep mktemp \
-	newgrp \
+	nbperf newgrp \
 	passwd \
 	sed seq \
-	stat su \
+	sort stat su \
 	tic \
-	uniq  \
+	tsort \
+	uniq \
 	xinstall 
 
 .if !defined(__MINIX)
