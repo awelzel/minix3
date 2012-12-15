@@ -21,6 +21,7 @@ PROTO_FILES=proto.common.etc proto.common.dynamic proto.sh proto.dev
 
 .if ${MKSMALL} != "yes"
 PROG_DRIVERS+= ahci
+PROG_DRIVERS+= virtio_blk
 PROG_SERVERS+= ext2
 PROTO= proto
 .else
