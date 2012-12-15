@@ -43,7 +43,7 @@ SUBDIR+= libcompat_minix libblockdriver libchardriver     \
        libexec libdevman libusb libasyn librmt \
        libddekit libminixfs libbdev libelf libminc libcrypt libterminfo \
        libvassert libutil libbz2 libprop \
-       libnetsock libpuffs libsffs libhgfs libvboxfs 
+       libnetsock libpuffs libsffs libhgfs libvboxfs libvirtio
 
 .if (${MKRUMP} != "no")
 SUBDIR+=	librumpclient
